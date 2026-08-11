@@ -1,0 +1,30 @@
+name: voxdoc-trainer
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pytorch
+  - pytorch-cuda=12.1
+  - pip:
+      - transformers
+      - trl
+      - peft
+      - accelerate
+      - datasets
+      - bitsandbytes
+      - wandb
+      - tensorboard
+      - lm-eval
+      - vllm
+      - pytest
+      - black
+      - rich
+      - sentencepiece
+      - protobuf
+      - pillow
+      - pyyaml
+      - python-dotenv

@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voxdoc-trainer"
+version = "0.1.0"
+description = "Training LLMs for Historical Document Understanding"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "transformers",
+    "trl",
+    "peft",
+    "accelerate",
+    "datasets",
+    "bitsandbytes",
+    "wandb",
+    "tensorboard",
+    "lm-eval",
+    "vllm",
+    "rich",
+    "sentencepiece",
+    "protobuf",
+    "pillow",
+    "pyyaml",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+]
+
+[tool.black]
+line-length = 128
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "e2e: end-to-end integration tests (deselect with '-m \"not e2e\"')",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*", "utils*"]

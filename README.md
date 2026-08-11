@@ -1,2 +1,49 @@
 # voxdoc-trainer
-Training LLMs for Historical Document Understanding
+
+Training LLMs for Historical Document Understanding.
+
+A production-quality, model-agnostic codebase for fine-tuning vision-language LLMs (Qwen3.5-9B and newer) on historical document understanding data, built on Hugging Face TRL + PEFT (LoRA/QLoRA) + accelerate.
+
+## Training methods
+
+| Data type | Method | Trainer |
+| --- | --- | --- |
+| Corrections to LLM answers | SFT | `SFTTrainer` |
+| A/B comparisons | DPO | `DPOTrainer` |
+| Good/bad feedback | KTO | `KTOTrainer` |
+| Feedback / reward signals | GRPO (online RL) | `GRPOTrainer` |
+
+## Quick start
+
+See [docs/setup.md](docs/setup.md) for full setup instructions.
+
+```bash
+mamba env create -f environment.yml
+mamba activate voxdoc-trainer
+```
+
+## Project layout
+
+- `src/` — training entry points and config
+  - `src/config.py` — model-agnostic config system (`RunConfig`, `ModelConfig`, `DataConfig`, `TrainingConfig`, `GRPOConfig`)
+  - `src/peft_utils.py` — LoRA/QLoRA config builders
+  - `src/train_sft.py`, `src/train_dpo.py`, `src/train_kto.py`, `src/train_grpo.py` — TRL trainers
+- `configs/` — example YAML configs for each method (chained pipeline + dry-run)
+- `tools/` — data conversion, evaluation, post-training utilities
+  - `tools/convert_data.py` — raw JSONL → TRL-format HF datasets
+  - `tools/build_doclang_data.py` — build SFT data teaching the model to emit DocLang natively
+  - `tools/evaluate.py` — lm-eval-harness wrapper
+  - `tools/merge_adapter.py` — merge a LoRA adapter into the base model
+  - `tools/serve.py` — lightweight inference
+- `utils/` — shared helpers
+  - `utils/logging.py` — logger, git commit, config hash
+  - `utils/paths.py` — output directory helpers
+- `tests/` — unit tests; `tests/e2e/` — end-to-end integration tests
+- `docs/` — documentation and the implementation plan
+
+## Documentation
+
+- [docs/PLAN.md](docs/PLAN.md) — the full implementation plan
+- [docs/setup.md](docs/setup.md) — environment setup
+- [docs/usage.md](docs/usage.md) — running training, evaluation, and post-training
+- [docs/data_formats.md](docs/data_formats.md) — data formats and conversion

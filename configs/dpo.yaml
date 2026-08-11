@@ -1,0 +1,48 @@
+# DPO config — A/B comparisons.
+# Second stage of the recommended pipeline. Point model_id at the SFT output.
+method: dpo
+model:
+  model_id: outputs/sft_run
+  trust_remote_code: false
+  dtype: bfloat16
+  use_qlora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, v_proj, k_proj, o_proj]
+  lora_bias: none
+  router_aux_loss_coef: 0.001
+data:
+  train_path: data/train_dpo
+  eval_path: null
+  max_length: null
+  dataset_num_proc: 4
+  shuffle: true
+  pad_to_multiple_of: null
+training:
+  output_dir: outputs/dpo_run
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 1
+  num_train_epochs: 3
+  max_steps: -1
+  learning_rate: 1e-5
+  lr_scheduler_type: linear
+  warmup_steps: 0
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  bf16: true
+  fp16: false
+  logging_steps: 10
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 3
+  eval_strategy: "no"
+  eval_steps: null
+  report_to: [tensorboard]
+  seed: 42
+  dry_run: false
+  dry_run_steps: 2
+  assistant_only_loss: false
+  precompute_ref_log_probs: false
