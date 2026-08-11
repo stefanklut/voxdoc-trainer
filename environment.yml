@@ -1,15 +1,17 @@
 name: voxdoc-trainer
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
+  - python=3.13
   - pip
-  - pytorch
-  - pytorch-cuda=12.1
   - pip:
+      # PyTorch 2.13 with CUDA 13.2 from the official PyTorch index.
+      # (pytorch-cuda 13.2 is not available in conda channels; the pytorch
+      # channel only ships pytorch-cuda up to 12.4, and conda-forge's
+      # pytorch-gpu 2.13.0 is built against CUDA 12.9.)
+      - torch --index-url https://download.pytorch.org/whl/cu132
+      - torchvision --index-url https://download.pytorch.org/whl/cu132
       - transformers
       - trl
       - peft
