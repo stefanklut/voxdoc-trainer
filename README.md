@@ -35,6 +35,9 @@ mamba activate voxdoc-trainer
   - `tools/evaluate.py` — lm-eval-harness wrapper
   - `tools/merge_adapter.py` — merge a LoRA adapter into the base model
   - `tools/serve.py` — lightweight inference
+- `scripts/` — shell utilities
+  - `scripts/find_images.sh` — find images, shuffle, and save filenames to a list
+  - `scripts/sample_lists.sh` — sample from the top of multiple shuffled image lists
 - `utils/` — shared helpers
   - `utils/logging.py` — logger, git commit, config hash
   - `utils/paths.py` — output directory helpers

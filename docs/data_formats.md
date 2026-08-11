@@ -35,7 +35,8 @@ to consume directly. If the model does not support it natively, we teach it to b
 giving it many examples of existing OCR already in DocLang format.
 
 Build SFT training data from a directory of existing DocLang XML documents (plus their
-source images). The model sees a document image and must produce the DocLang
+source images, in any format Pillow can open — png, jpg, webp, tiff, etc.).
+The model sees a document image and must produce the DocLang
 representation as its completion, so it learns the format itself:
 
 ```bash

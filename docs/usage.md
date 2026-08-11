@@ -83,7 +83,8 @@ advanced and best treated as a later optimization.
 ## Build DocLang training data
 
 To teach the model to emit DocLang natively, build SFT examples from existing
-OCR already in DocLang format (see [docs/data_formats.md](data_formats.md)):
+OCR already in DocLang format (see [docs/data_formats.md](data_formats.md)).
+Source images may be in any format Pillow can open (png, jpg, webp, tiff, etc.):
 
 ```bash
 python tools/build_doclang_data.py --input path/to/doclang_xml/ --images path/to/images/ --output data/transcription

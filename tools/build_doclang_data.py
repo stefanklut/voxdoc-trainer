@@ -22,6 +22,23 @@ from datasets import Dataset
 from PIL import Image as PILImage
 
 
+def find_image(image_dir: Path, stem: str) -> Path | None:
+    """Find a source image for a document in any format PIL can open.
+
+    Args:
+        image_dir (Path): Directory to search for the source document image.
+        stem (str): Document stem to match against image filenames.
+
+    Returns:
+        Path | None: The first matching image path, or None if no supported image exists.
+    """
+    for extension in sorted(PILImage.registered_extensions()):
+        candidate = image_dir / f"{stem}{extension}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def build_sft_record(xml_path: Path, image_path: Path | None) -> dict:
     """Build a single SFT record teaching the model to emit DocLang.
 
@@ -37,9 +54,7 @@ def build_sft_record(xml_path: Path, image_path: Path | None) -> dict:
     prompt = [
         {
             "role": "user",
-            "content": [
-                {"type": "text", "text": "Transcribe this historical document into DocLang format."}
-            ],
+            "content": [{"type": "text", "text": "Transcribe this historical document into DocLang format."}],
         }
     ]
     completion = [{"role": "assistant", "content": [{"type": "text", "text": doclang_xml}]}]
@@ -49,9 +64,7 @@ def build_sft_record(xml_path: Path, image_path: Path | None) -> dict:
 
 def main() -> None:
     """Build an SFT dataset from a directory of existing DocLang XML documents."""
-    parser = argparse.ArgumentParser(
-        description="Build SFT training data from existing DocLang XML documents."
-    )
+    parser = argparse.ArgumentParser(description="Build SFT training data from existing DocLang XML documents.")
     parser.add_argument("--input", required=True, help="Directory of DocLang XML files.")
     parser.add_argument("--output", required=True, help="Path to save the HF dataset.")
     parser.add_argument("--images", default=None, help="Optional directory of source document images.")
@@ -61,9 +74,7 @@ def main() -> None:
     image_dir = Path(args.images) if args.images else None
     records = []
     for xml_file in sorted(input_dir.glob("*.xml")):
-        image_path = image_dir / f"{xml_file.stem}.png" if image_dir else None
-        if image_path and not image_path.exists():
-            image_path = None
+        image_path = find_image(image_dir, xml_file.stem) if image_dir else None
         records.append(build_sft_record(xml_file, image_path))
 
     dataset = Dataset.from_list(records)
