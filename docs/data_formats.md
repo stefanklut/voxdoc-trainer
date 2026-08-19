@@ -4,10 +4,61 @@ Data is stored as JSONL (source of truth) and converted to Hugging Face datasets
 for training. Conversion happens **before** applying the chat template, per TRL
 recommendation.
 
+Each row may use either a structured `messages` history (multi-turn) or the
+legacy `prompt` field (single-turn). The `messages` field holds the prior
+conversation; the task-specific field (`completion`, `chosen`, `rejected`,
+`label`) describes the next assistant response.
+
+## Message history
+
+A `messages` history is a list of `system`, `user`, and `assistant` messages.
+The final message must be from the user. `content` may be a plain string or a
+list of content blocks for multimodal input:
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "Read this document."},
+    {"role": "assistant", "content": "I found an uncertain section."},
+    {"role": "user", "content": "Explain that section."}
+  ],
+  "completion": "The section appears to describe..."
+}
+```
+
+Images are referenced inside a message's content blocks with
+`{"type": "image", "image": "path/to/doc.png"}`. The converter collects the
+actual images into the dataset's `images` column in placeholder order and
+replaces each block with a `{"type": "image"}` placeholder, matching TRL's
+vision convention:
+
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image", "image": "path/to/doc.png"},
+        {"type": "text", "text": "Read this document."}
+      ]
+    },
+    {"role": "assistant", "content": "I found an uncertain section."},
+    {"role": "user", "content": "Explain that section."}
+  ],
+  "completion": "The section appears to describe..."
+}
+```
+
 ## SFT (corrections)
 
 ```json
 {"image": "path/to/doc.png", "prompt": "Read this document.", "completion": "The corrected transcription."}
+```
+
+Multi-turn:
+
+```json
+{"messages": [{"role": "user", "content": "Read this document."}, {"role": "assistant", "content": "I found an uncertain section."}, {"role": "user", "content": "Explain that section."}], "completion": "The section appears to describe..."}
 ```
 
 ## DPO (A/B comparisons)
@@ -16,10 +67,22 @@ recommendation.
 {"image": "path/to/doc.png", "prompt": "Read this document.", "chosen": "The preferred answer.", "rejected": "The dispreferred answer."}
 ```
 
+Multi-turn:
+
+```json
+{"messages": [{"role": "user", "content": "Read this document."}, {"role": "assistant", "content": "I found an uncertain section."}, {"role": "user", "content": "Explain that section."}], "chosen": "The preferred answer.", "rejected": "The dispreferred answer."}
+```
+
 ## KTO (good/bad feedback)
 
 ```json
 {"image": "path/to/doc.png", "prompt": "Read this document.", "completion": "The answer.", "label": true}
+```
+
+Multi-turn:
+
+```json
+{"messages": [{"role": "user", "content": "Read this document."}, {"role": "assistant", "content": "I found an uncertain section."}, {"role": "user", "content": "Explain that section."}], "completion": "The answer.", "label": true}
 ```
 
 ## GRPO (feedback / reward)
@@ -27,6 +90,29 @@ recommendation.
 ```json
 {"image": "path/to/doc.png", "prompt": "Read this document."}
 ```
+
+Multi-turn (the model generates the next response):
+
+```json
+{"messages": [{"role": "user", "content": "Read this document."}, {"role": "assistant", "content": "I found an uncertain section."}, {"role": "user", "content": "Explain that section."}]}
+```
+
+## Migrating from `prompt` to `messages`
+
+A legacy single-turn row maps directly to a one-message history:
+
+```json
+{"image": "path/to/doc.png", "prompt": "Read this document.", "completion": "The corrected transcription."}
+```
+
+becomes:
+
+```json
+{"messages": [{"role": "user", "content": [{"type": "image", "image": "path/to/doc.png"}, {"type": "text", "text": "Read this document."}]}], "completion": "The corrected transcription."}
+```
+
+Both forms are accepted by the converter; `messages` is preferred for new data
+because it supports follow-up turns.
 
 ## DocLang (historical document transcription)
 

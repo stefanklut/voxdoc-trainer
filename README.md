@@ -49,4 +49,4 @@ mamba activate voxdoc-trainer
 - [docs/PLAN.md](docs/PLAN.md) — the full implementation plan
 - [docs/setup.md](docs/setup.md) — environment setup
 - [docs/usage.md](docs/usage.md) — running training, evaluation, and post-training
-- [docs/data_formats.md](docs/data_formats.md) — data formats and conversion
+- [docs/data_formats.md](docs/data_formats.md) — data formats and conversion (single-turn `prompt` and multi-turn `messages`)

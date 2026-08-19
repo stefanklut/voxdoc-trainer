@@ -28,6 +28,20 @@ training:
   precompute_ref_log_probs: false
 ```
 
+## Message history
+
+Raw JSONL supports both legacy `prompt` rows and structured `messages` rows
+(see [docs/data_formats.md](data_formats.md)). Conversion happens before the
+model chat template is applied. SFT, DPO, and KTO learn the next response
+conditioned on the complete history; GRPO uses the history as its generation
+prompt. The model's chat template must support the selected message roles and
+multimodal content format.
+
+The training entry points consume the converted conversational datasets
+directly and require no separate configuration for ordinary message history.
+Interactive follow-up turns during GRPO generation (via tools or an
+`environment_factory`) are a separate, later feature.
+
 ## Run training
 
 Example configs are provided in `configs/` for each method, with sensible

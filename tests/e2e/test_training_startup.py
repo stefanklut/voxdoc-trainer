@@ -18,12 +18,20 @@ pytestmark = pytest.mark.e2e
 def test_sft_training_startup(tmp_path) -> None:
     """A tiny SFT run should complete a few steps and save a checkpoint."""
     from datasets import Dataset
+
     from tools.convert_data import to_sft
 
-    # Build a tiny dataset from a couple of records.
+    # Build a tiny dataset from a couple of records, including a multi-turn one.
     rows = [
         {"prompt": "Read this.", "completion": "Output."},
-        {"prompt": "Read this.", "completion": "More output."},
+        {
+            "messages": [
+                {"role": "user", "content": "Read this."},
+                {"role": "assistant", "content": "I found an uncertain section."},
+                {"role": "user", "content": "Explain that section."},
+            ],
+            "completion": "The section appears to describe...",
+        },
     ]
     dataset = to_sft(rows)
     dataset.save_to_disk(str(tmp_path / "train"))
@@ -50,5 +58,8 @@ def test_sft_training_startup(tmp_path) -> None:
 
     # Run the training pipeline (requires a GPU / installed deps).
     train(config)
-    checkpoint_dir = tmp_path / "out"
-    assert checkpoint_dir.exists()
+
+    # The output dir is created before training, so assert on an actual
+    # checkpoint being written after the training steps complete.
+    checkpoints = list((tmp_path / "out").glob("checkpoint-*"))
+    assert checkpoints, "expected at least one checkpoint directory after training"

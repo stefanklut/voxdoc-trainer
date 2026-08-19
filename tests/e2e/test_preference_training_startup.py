@@ -10,9 +10,12 @@ from __future__ import annotations
 import pytest
 
 from src.config import RunConfig
-from src.train_dpo import build_dpo_config, train as train_dpo
-from src.train_grpo import build_grpo_config, train as train_grpo
-from src.train_kto import build_kto_config, train as train_kto
+from src.train_dpo import build_dpo_config
+from src.train_dpo import train as train_dpo
+from src.train_grpo import build_grpo_config
+from src.train_grpo import train as train_grpo
+from src.train_kto import build_kto_config
+from src.train_kto import train as train_kto
 from tools.convert_data import to_dpo, to_grpo, to_kto
 
 pytestmark = pytest.mark.e2e
@@ -22,7 +25,15 @@ def test_dpo_training_startup(tmp_path) -> None:
     """A tiny DPO run should complete a few steps and save a checkpoint."""
     rows = [
         {"prompt": "Read this.", "chosen": "Good answer.", "rejected": "Bad answer."},
-        {"prompt": "Read this.", "chosen": "Better answer.", "rejected": "Worse answer."},
+        {
+            "messages": [
+                {"role": "user", "content": "Read this."},
+                {"role": "assistant", "content": "I found an uncertain section."},
+                {"role": "user", "content": "Explain that section."},
+            ],
+            "chosen": "The section describes...",
+            "rejected": "I cannot determine anything.",
+        },
     ]
     dataset = to_dpo(rows)
     dataset.save_to_disk(str(tmp_path / "train"))
@@ -47,14 +58,26 @@ def test_dpo_training_startup(tmp_path) -> None:
     assert dpo_config.max_steps == 2
 
     train_dpo(config)
-    assert (tmp_path / "out").exists()
+
+    # The output dir is created before training, so assert on an actual
+    # checkpoint being written after the training steps complete.
+    checkpoints = list((tmp_path / "out").glob("checkpoint-*"))
+    assert checkpoints, "expected at least one checkpoint directory after training"
 
 
 def test_kto_training_startup(tmp_path) -> None:
     """A tiny KTO run should complete a few steps and save a checkpoint."""
     rows = [
         {"prompt": "Read this.", "completion": "Good answer.", "label": True},
-        {"prompt": "Read this.", "completion": "Bad answer.", "label": False},
+        {
+            "messages": [
+                {"role": "user", "content": "Read this."},
+                {"role": "assistant", "content": "I found an uncertain section."},
+                {"role": "user", "content": "Explain that section."},
+            ],
+            "completion": "Bad answer.",
+            "label": False,
+        },
     ]
     dataset = to_kto(rows)
     dataset.save_to_disk(str(tmp_path / "train"))
@@ -80,14 +103,24 @@ def test_kto_training_startup(tmp_path) -> None:
     assert kto_config.max_steps == 2
 
     train_kto(config)
-    assert (tmp_path / "out").exists()
+
+    # The output dir is created before training, so assert on an actual
+    # checkpoint being written after the training steps complete.
+    checkpoints = list((tmp_path / "out").glob("checkpoint-*"))
+    assert checkpoints, "expected at least one checkpoint directory after training"
 
 
 def test_grpo_training_startup(tmp_path) -> None:
     """A tiny GRPO run should complete a few steps and save a checkpoint."""
     rows = [
         {"prompt": "Read this."},
-        {"prompt": "Read this."},
+        {
+            "messages": [
+                {"role": "user", "content": "Read this."},
+                {"role": "assistant", "content": "I found an uncertain section."},
+                {"role": "user", "content": "Explain that section."},
+            ]
+        },
     ]
     dataset = to_grpo(rows)
     dataset.save_to_disk(str(tmp_path / "train"))
@@ -114,4 +147,8 @@ def test_grpo_training_startup(tmp_path) -> None:
     assert grpo_config.max_steps == 2
 
     train_grpo(config)
-    assert (tmp_path / "out").exists()
+
+    # The output dir is created before training, so assert on an actual
+    # checkpoint being written after the training steps complete.
+    checkpoints = list((tmp_path / "out").glob("checkpoint-*"))
+    assert checkpoints, "expected at least one checkpoint directory after training"
