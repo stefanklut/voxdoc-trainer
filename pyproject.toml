@@ -14,6 +14,7 @@ dependencies = [
     "peft",
     "accelerate",
     "datasets",
+    "doclang[schematron-saxon]",
     "bitsandbytes",
     "wandb",
     "tensorboard",

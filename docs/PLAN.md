@@ -56,7 +56,7 @@ Built on **TRL + PEFT (LoRA/QLoRA) + accelerate**, targeting **Qwen3.5-9B** on a
 ### Phase 1 — Data organization (tools/ + utils/)
 
 1. Data converters (mirror TRL `examples/datasets/`): corrections → SFT; A/B → DPO; good/bad → KTO; feedback → GRPO reward data. Vision `images` column + content dicts
-2. **DocLang integration (doclang.ai)** — AI-native XML document format (Linux Foundation/IBM/ABBYY/NVIDIA standard) for loading existing OCR of historical documents. **Teach the model to emit DocLang natively** by giving it many examples of existing OCR already in DocLang format. `tools/build_doclang_data.py` builds SFT training data: the model sees a document image and must produce the DocLang representation as its completion. *(Verify reference implementation availability in `environment.yml`.)*
+2. **DocLang integration (doclang.ai)** — AI-native document format (Linux Foundation/IBM/ABBYY/NVIDIA standard) for loading existing OCR of historical documents. **Teach the model to emit DocLang natively** by giving it many examples of existing OCR already in DocLang format. `tools/build_doclang_data.py` builds SFT training data from `.dclg` files: the model sees a document image and must produce the DocLang representation as its completion. Each document is validated with the official `doclang` package (XSD + Schematron) before it is added; invalid documents are skipped. *(Reference implementation integrated via the `doclang[schematron-saxon]` pip package in `environment.yml`.)*
 3. `utils/` shared helpers (paths, logging, config loading)
 
 ### Phase 2 — Training (src/)
@@ -118,4 +118,4 @@ Built on **TRL + PEFT (LoRA/QLoRA) + accelerate**, targeting **Qwen3.5-9B** on a
 1. **Logging backend** — W&B vs TensorBoard. Recommendation: support both, default TensorBoard for PoC.
 2. **Data storage format** — JSONL as source of truth, convert to HF `datasets` for training.
 3. **GRPO is memory-intensive** — needs vLLM or continuous batching; implement after SFT/DPO/KTO are proven.
-4. **DocLang tooling maturity** — the spec is open (Linux Foundation), but reference implementation may be early-stage; verify availability before committing to it.
+4. **DocLang tooling maturity** — the spec is open (Linux Foundation); the reference `doclang` pip package (v0.7.x) is available and used for validation. Full Schematron validation needs a JRE (via the `schematron-saxon` extra); XSD-only validation avoids that dependency.

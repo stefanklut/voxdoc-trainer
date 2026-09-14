@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from doclang import ValidationError
 from PIL import Image
 
-from tools.build_doclang_data import build_sft_record, find_image
+from tools.build_doclang_data import build_dataset, build_sft_record, find_image
 
 
 def _make_image(path: Path) -> None:
@@ -27,11 +28,44 @@ def test_find_image_returns_none_when_missing(tmp_path: Path) -> None:
 
 def test_build_sft_record_attaches_image(tmp_path: Path) -> None:
     """build_sft_record should attach a non-png image to the record."""
-    xml_path = tmp_path / "doc.xml"
-    xml_path.write_text("<doc>content</doc>", encoding="utf-8")
+    doclang_path = tmp_path / "doc.dclg"
+    doclang_path.write_text("<doclang>content</doclang>", encoding="utf-8")
     image_path = tmp_path / "doc.webp"
     _make_image(image_path)
 
-    record = build_sft_record(xml_path, image_path)
+    record = build_sft_record(doclang_path, image_path)
     assert len(record["images"]) == 1
     assert record["completion"][0]["role"] == "assistant"
+
+
+def test_build_dataset_includes_valid_documents(tmp_path: Path) -> None:
+    """build_dataset should include documents that pass validation."""
+    doclang_path = tmp_path / "doc.dclg"
+    doclang_path.write_text("<doclang>content</doclang>", encoding="utf-8")
+
+    records, skipped = build_dataset(tmp_path, validator=lambda _path: None)
+    assert skipped == 0
+    assert len(records) == 1
+    assert records[0]["completion"][0]["content"][0]["text"] == "<doclang>content</doclang>"
+
+
+def test_build_dataset_skips_invalid_documents(tmp_path: Path) -> None:
+    """build_dataset should skip documents that fail validation."""
+    doclang_path = tmp_path / "doc.dclg"
+    doclang_path.write_text("<doclang>content</doclang>", encoding="utf-8")
+
+    def failing_validator(_path: Path) -> None:
+        raise ValidationError(xsd_errors=[{"message": "not valid DocLang"}], schematron_errors=[])
+
+    records, skipped = build_dataset(tmp_path, validator=failing_validator)
+    assert skipped == 1
+    assert records == []
+
+
+def test_build_dataset_ignores_non_dclg_files(tmp_path: Path) -> None:
+    """build_dataset should only consider .dclg files."""
+    (tmp_path / "notes.xml").write_text("<doclang>content</doclang>", encoding="utf-8")
+
+    records, skipped = build_dataset(tmp_path, validator=lambda _path: None)
+    assert records == []
+    assert skipped == 0

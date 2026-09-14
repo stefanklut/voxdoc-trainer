@@ -101,7 +101,7 @@ OCR already in DocLang format (see [docs/data_formats.md](data_formats.md)).
 Source images may be in any format Pillow can open (png, jpg, webp, tiff, etc.):
 
 ```bash
-python tools/build_doclang_data.py --input path/to/doclang_xml/ --images path/to/images/ --output data/transcription
+python tools/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
 ```
 
 ## Dry-run / smoke mode

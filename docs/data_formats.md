@@ -120,13 +120,15 @@ DocLang (<https://doclang.ai/>) is an AI-native XML document format designed for
 to consume directly. If the model does not support it natively, we teach it to by
 giving it many examples of existing OCR already in DocLang format.
 
-Build SFT training data from a directory of existing DocLang XML documents (plus their
-source images, in any format Pillow can open — png, jpg, webp, tiff, etc.).
-The model sees a document image and must produce the DocLang
-representation as its completion, so it learns the format itself:
+Build SFT training data from a directory of existing DocLang documents (`.dclg`
+files, plus their source images, in any format Pillow can open — png, jpg, webp,
+tiff, etc.). Each document is validated with the official `doclang` package before
+it is added; invalid documents are skipped. The model sees a document image and
+must produce the DocLang representation as its completion, so it learns the format
+itself:
 
 ```bash
-python tools/build_doclang_data.py --input path/to/doclang_xml/ --images path/to/images/ --output data/transcription
+python tools/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
 ```
 
 ## Converting JSONL to HF datasets

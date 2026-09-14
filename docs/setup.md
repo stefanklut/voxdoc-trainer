@@ -15,7 +15,7 @@ mamba activate voxdoc-trainer
 ## Verify the environment
 
 ```bash
-python -c "import trl, transformers, peft, accelerate; print('OK')"
+python -c "import trl, transformers, peft, accelerate, doclang; print('OK')"
 ```
 
 ## Run tests
