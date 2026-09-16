@@ -98,10 +98,23 @@ advanced and best treated as a later optimization.
 
 To teach the model to emit DocLang natively, build SFT examples from existing
 OCR already in DocLang format (see [docs/data_formats.md](data_formats.md)).
-Source images may be in any format Pillow can open (png, jpg, webp, tiff, etc.):
+Each document needs a matching source image (any format Pillow can open — png,
+jpg, webp, tiff, etc.); documents without one are skipped:
 
 ```bash
-python tools/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+python tools/data_creators/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+```
+
+## Build transcription training data
+
+To teach the model to transcribe a document image to plain unicode, build SFT
+examples from PAGE XML ground-truth files and their source images. The
+transcription is extracted from the PAGE XML (lines ordered by reading order when
+available); files that cannot be parsed, that contain no text, or that have no
+matching image are skipped:
+
+```bash
+python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
 ```
 
 ## Dry-run / smoke mode

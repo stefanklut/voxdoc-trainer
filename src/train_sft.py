@@ -14,10 +14,10 @@ from trl import SFTConfig, SFTTrainer
 
 from src.config import RunConfig, load_config
 from src.peft_utils import build_lora_config, build_quantization_config
-from utils.logging import get_logger, write_run_metadata
+from utils.logging_utils import get_logger, setup_logger, write_run_metadata
 from utils.paths import run_output_dir
 
-logger = get_logger(__name__)
+logger = get_logger()
 
 
 def build_sft_config(config: RunConfig) -> SFTConfig:
@@ -89,6 +89,7 @@ def train(config: RunConfig) -> None:
 
 def main() -> None:
     """CLI entry point for SFT training."""
+    setup_logger()
     parser = argparse.ArgumentParser(description="Run SFT training.")
     parser.add_argument("--config", type=str, default=None, help="Path to a YAML config file.")
     args = parser.parse_args()

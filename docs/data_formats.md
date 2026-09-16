@@ -121,14 +121,28 @@ to consume directly. If the model does not support it natively, we teach it to b
 giving it many examples of existing OCR already in DocLang format.
 
 Build SFT training data from a directory of existing DocLang documents (`.dclg`
-files, plus their source images, in any format Pillow can open — png, jpg, webp,
+files) and their source images (in any format Pillow can open — png, jpg, webp,
 tiff, etc.). Each document is validated with the official `doclang` package before
-it is added; invalid documents are skipped. The model sees a document image and
-must produce the DocLang representation as its completion, so it learns the format
-itself:
+it is added; documents that fail validation or have no matching source image are
+skipped. The model sees a document image and must produce the DocLang
+representation as its completion, so it learns the format itself:
 
 ```bash
-python tools/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+python tools/data_creators/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+```
+
+## PAGE XML (plain unicode transcription)
+
+Build SFT training data that teaches the model to transcribe a document image to
+plain unicode. The tool reads a directory of PAGE XML ground-truth files (`.xml`)
+and their source images, extracts each document's transcription (lines ordered by
+their reading order when available), and emits one SFT example per document: the
+model sees the image and must produce the transcription as its completion. Files
+that cannot be parsed, that contain no text, or that have no matching image are
+skipped:
+
+```bash
+python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
 ```
 
 ## Converting JSONL to HF datasets

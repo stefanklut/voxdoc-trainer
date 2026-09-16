@@ -31,7 +31,8 @@ mamba activate voxdoc-trainer
 - `configs/` — example YAML configs for each method (chained pipeline + dry-run)
 - `tools/` — data conversion, evaluation, post-training utilities
   - `tools/convert_data.py` — raw JSONL → TRL-format HF datasets
-  - `tools/build_doclang_data.py` — build SFT data teaching the model to emit DocLang natively
+  - `tools/data_creators/build_doclang_data.py` — build SFT data teaching the model to emit DocLang natively
+  - `tools/data_creators/build_transcription_data.py` — build SFT data teaching the model to transcribe PAGE XML to plain unicode
   - `tools/evaluate.py` — lm-eval-harness wrapper
   - `tools/merge_adapter.py` — merge a LoRA adapter into the base model
   - `tools/serve.py` — lightweight inference
@@ -39,8 +40,10 @@ mamba activate voxdoc-trainer
   - `scripts/find_images.sh` — find images, shuffle, and save filenames to a list
   - `scripts/sample_lists.sh` — sample from the top of multiple shuffled image lists
 - `utils/` — shared helpers
-  - `utils/logging.py` — logger, git commit, config hash
+  - `utils/logging_utils.py` — unified logging (logger, setup, git commit, config hash, run metadata)
+  - `utils/page_xml_editor.py` — PAGE XML parsing and transcription extraction
   - `utils/paths.py` — output directory helpers
+  - `utils/tempdir.py` — optional temp dir + atomic file name helpers
 - `tests/` — unit tests; `tests/e2e/` — end-to-end integration tests
 - `docs/` — documentation and the implementation plan
 

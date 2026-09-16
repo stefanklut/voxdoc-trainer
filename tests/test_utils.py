@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from src.config import RunConfig
-from utils.logging import config_hash, git_commit
+from utils.logging_utils import config_hash, git_commit
 
 
 def test_config_hash_is_stable() -> None:

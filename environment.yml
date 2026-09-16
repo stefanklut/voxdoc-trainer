@@ -5,29 +5,33 @@ channels:
 dependencies:
   - python=3.13
   - pip
+  - termcolor
+  - python-dotenv
+  - wandb
+  - tensorboard
+  - pytest
+  - black
+  - rich
+  - sentencepiece
+  - protobuf
+  - pillow
+  - pyyaml
   - pip:
-      # PyTorch 2.13 with CUDA 13.2 from the official PyTorch index.
-      # (pytorch-cuda 13.2 is not available in conda channels; the pytorch
-      # channel only ships pytorch-cuda up to 12.4, and conda-forge's
-      # pytorch-gpu 2.13.0 is built against CUDA 12.9.)
-      - torch --index-url https://download.pytorch.org/whl/cu132
-      - torchvision --index-url https://download.pytorch.org/whl/cu132
+      # torch/torchvision pinned to the exact versions vllm 0.29.0 requires
+      # (torch==2.13.0, torchvision==0.28.0, torchaudio==2.11.0); unpinned,
+      # pip picks torch 2.14.0 and backtracks vllm until resolution fails.
+      # These resolve to the plain PyPI builds (CUDA 13.0). Do NOT add the
+      # PyTorch cu132 index here: vllm's torchaudio==2.11.0 pin only exists as
+      # a CUDA 13.0 build, and a CUDA 13.2 torch mixed with a CUDA 13.0
+      # torchaudio raises a version-mismatch error on import.
+      - torch==2.13.0
+      - torchvision==0.28.0
       - transformers
+      - vllm
       - trl
       - peft
       - accelerate
       - datasets
-      - doclang[schematron-saxon]
       - bitsandbytes
-      - wandb
-      - tensorboard
       - lm-eval
-      - vllm
-      - pytest
-      - black
-      - rich
-      - sentencepiece
-      - protobuf
-      - pillow
-      - pyyaml
-      - python-dotenv
+      - doclang[schematron-saxon]
