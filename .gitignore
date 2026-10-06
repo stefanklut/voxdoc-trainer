@@ -224,3 +224,6 @@ checkpoints/
 *.safetensors
 *.bin
 wandb/
+
+tests/data/doclang_corpus/
+tests/data/doclang_invalid/

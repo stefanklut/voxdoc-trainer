@@ -28,6 +28,7 @@ mamba activate voxdoc-trainer
   - `src/config.py` — model-agnostic config system (`RunConfig`, `ModelConfig`, `DataConfig`, `TrainingConfig`, `GRPOConfig`)
   - `src/peft_utils.py` — LoRA/QLoRA config builders
   - `src/train_sft.py`, `src/train_dpo.py`, `src/train_kto.py`, `src/train_grpo.py` — TRL trainers
+  - `src/doclang_structured/` — constrained DocLang (`.dclg`) generation: EBNF grammar + Pydantic/JSON-schema fallback, validator-gated
 - `configs/` — example YAML configs for each method (chained pipeline + dry-run)
 - `tools/` — data conversion, evaluation, post-training utilities
   - `tools/convert_data.py` — raw JSONL → TRL-format HF datasets
@@ -36,6 +37,7 @@ mamba activate voxdoc-trainer
   - `tools/evaluate.py` — lm-eval-harness wrapper
   - `tools/merge_adapter.py` — merge a LoRA adapter into the base model
   - `tools/serve.py` — lightweight inference
+  - `tools/generate_doclang.py` — generate a validated `.dclg` document from a vLLM server (grammar or JSON-schema path)
 - `scripts/` — shell utilities
   - `scripts/find_images.sh` — find images, shuffle, and save filenames to a list
   - `scripts/sample_lists.sh` — sample from the top of multiple shuffled image lists
@@ -53,3 +55,4 @@ mamba activate voxdoc-trainer
 - [docs/setup.md](docs/setup.md) — environment setup
 - [docs/usage.md](docs/usage.md) — running training, evaluation, and post-training
 - [docs/data_formats.md](docs/data_formats.md) — data formats and conversion (single-turn `prompt` and multi-turn `messages`)
+- [docs/structured_output.md](docs/structured_output.md) — constrained DocLang (`.dclg`) generation via grammar / JSON schema, with the XSD sync-guarantee test suite

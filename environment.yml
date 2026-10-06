@@ -35,3 +35,7 @@ dependencies:
       - bitsandbytes
       - lm-eval
       - doclang[schematron-saxon]
+      - pydantic
+      - openai
+      - lark
+      - hypothesis

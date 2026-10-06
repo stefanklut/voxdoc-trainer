@@ -145,6 +145,36 @@ skipped:
 python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
 ```
 
+## BBox <-> Text (grounding)
+
+Build SFT training data that teaches the model to ground text in bounding boxes
+(and vice versa). The tool reads a directory of PAGE XML (`.xml`) and DocLang
+(`.dclg`) files and their source images, and emits one SFT example per text
+line: PAGE XML `TextLine` polygons are fit to bounding boxes, and DocLang
+`<text>` elements use their four `<location>` values (interpreted as
+`x_min, y_min, x_max, y_max`, per the DocLang spec).
+
+Two task modes (`--mode`):
+
+- `bbox_to_text` — the model sees the image and a bounding box and must produce the text inside it.
+- `text_to_bbox` — the model sees the image and a line of text and must produce the bounding box.
+
+Two bbox serializations (`--bbox-format`):
+
+- `qwen` — `[x1, y1, x2, y2]` integers normalized to the 0–1000 range (the Qwen-VL grounding convention).
+- `doclang` — the four `<location value="N"/>` elements in the document's native coordinate space (teaches the model to emit correct DocLang).
+
+Normalization uses the source's declared size (PAGE XML `imageWidth`/
+`imageHeight`; DocLang `<default_resolution>`), falling back to the actual
+image size. When the total number of (text, bbox) pairs across all input files
+exceeds `--max-lines`, a random subset of that size is sampled globally
+(`--seed` makes the selection reproducible). Files that cannot be parsed, that
+contain no usable pairs, or that have no matching image are skipped:
+
+```bash
+python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen
+```
+
 ## Converting JSONL to HF datasets
 
 ```bash

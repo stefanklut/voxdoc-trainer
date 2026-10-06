@@ -117,6 +117,22 @@ matching image are skipped:
 python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
 ```
 
+## Build bbox grounding training data
+
+To teach the model to ground text in bounding boxes — or to predict a bounding
+box for a line of text — build SFT examples from PAGE XML and/or DocLang files
+and their source images. Choose the task with `--mode` (`bbox_to_text` or
+`text_to_bbox`) and the bbox serialization with `--bbox-format` (`qwen` for
+`[x1, y1, x2, y2]` in 0–1000 space, or `doclang` for the four `<location>`
+elements). Use `--max-lines` to randomly sample at most N (text, bbox) pairs
+from the global pool of all input files (`--seed` makes the selection
+reproducible). Files that cannot be parsed, that contain no usable pairs, or
+that have no matching image are skipped:
+
+```bash
+python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen --max-lines 5000 --seed 42
+```
+
 ## Dry-run / smoke mode
 
 Set `dry_run: true` in the config (or `max_steps` to a tiny value) to
@@ -154,4 +170,19 @@ Run inference:
 
 ```bash
 python tools/serve.py --model outputs/merged --prompt "Read this document."
+```
+
+## Structured DocLang output (inference)
+
+To make a served model emit **only valid DocLang** (`.dclg`), use the
+structured-output package (`src/doclang_structured/`). It constrains an
+OpenAI-compatible endpoint (e.g. local vLLM) via an EBNF grammar (primary) or a
+JSON schema (fallback), and gates every result on the official `doclang`
+validator. See [docs/structured_output.md](structured_output.md) for the full
+API, the CLI, and the test suite (including the XSD sync guarantee).
+
+```bash
+python tools/generate_doclang.py \
+    --base-url http://localhost:8000/v1 --model outputs/merged \
+    --image scan.png --out doc.dclg
 ```

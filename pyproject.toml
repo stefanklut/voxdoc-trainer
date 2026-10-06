@@ -26,12 +26,16 @@ dependencies = [
     "pillow",
     "pyyaml",
     "python-dotenv",
+    "pydantic",
+    "openai",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "black",
+    "lark",
+    "hypothesis",
 ]
 
 [tool.black]
