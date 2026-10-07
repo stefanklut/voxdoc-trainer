@@ -365,7 +365,7 @@ def test_declared_size_doclang_without_resolution(tmp_path: Path) -> None:
 def test_declared_size_malformed_doclang_returns_none(tmp_path: Path) -> None:
     """A .dclg missing a required attribute (TypeError) yields None, not a crash."""
     dclg_path = tmp_path / "bad.dclg"
-    _make_doclang(dclg_path, '<text><thread/>x</text>')
+    _make_doclang(dclg_path, "<text><thread/>x</text>")
     assert declared_size(dclg_path) is None
 
 
@@ -412,9 +412,7 @@ def test_build_sft_record_text_to_bbox_doclang(tmp_path: Path) -> None:
     image_path = tmp_path / "doc.png"
     _make_image(image_path)
     record = build_sft_record("text_to_bbox", "doclang", "hello", (10, 20, 110, 45), (100, 200), image_path)
-    assert _prompt_text(record) == (
-        'Emit the DocLang <text> element with its <location> coordinates for the text: "hello".'
-    )
+    assert _prompt_text(record) == ('Emit the DocLang <text> element with its <location> coordinates for the text: "hello".')
     assert _completion_text(record) == (
         '<text><location value="10"/><location value="20"/><location value="110"/><location value="45"/>hello</text>'
     )
@@ -469,7 +467,7 @@ def test_build_dataset_skips_file_without_pairs(tmp_path: Path) -> None:
 def test_build_dataset_skips_malformed_doclang(tmp_path: Path) -> None:
     """A .dclg missing a required attribute (TypeError) is skipped, not fatal."""
     # <thread/> without thread_id makes doclang_xml_to_model raise TypeError.
-    _make_doclang(tmp_path / "bad.dclg", '<text><thread/>x</text>')
+    _make_doclang(tmp_path / "bad.dclg", "<text><thread/>x</text>")
     _make_page_xml(tmp_path / "good.xml", [("l1", "0,0 100,0 100,25 0,25", "ok")])
     images = tmp_path / "images"
     images.mkdir()
@@ -719,10 +717,7 @@ def test_build_line_neighbor_candidates_targets() -> None:
     assert by_prompt['What is the text of the 1st line below the line "second"?'] == "third"
     assert by_prompt['What is the text of the 1st line above the line "third"?'] == "second"
     assert by_prompt['What is the bounding box of the 1st line below the line "first"?'] == "[0, 300, 1000, 550]"
-    assert (
-        by_prompt["What is the text of the 1st line below the line with bounding box [0, 0, 1000, 250]?"]
-        == "second"
-    )
+    assert by_prompt["What is the text of the 1st line below the line with bounding box [0, 0, 1000, 250]?"] == "second"
 
 
 def test_build_line_neighbor_candidates_max_n() -> None:
@@ -741,9 +736,7 @@ def test_build_region_to_lines_candidates() -> None:
     """The completion lists all line bboxes in reading order."""
     region = _three_line_region()
     prompt, completion = build_region_to_lines_candidates(region, "qwen", (100, 100))[0]
-    assert prompt == (
-        "List the bounding boxes of all text lines in the paragraph [0, 0, 1000, 1000], in reading order."
-    )
+    assert prompt == ("List the bounding boxes of all text lines in the paragraph [0, 0, 1000, 1000], in reading order.")
     assert completion == "[[0, 0, 1000, 250], [0, 300, 1000, 550], [0, 600, 1000, 850]]"
 
 
@@ -803,8 +796,7 @@ def test_build_line_index_candidates() -> None:
     assert by_prompt['What is the position of the line "second" in its paragraph?'] == "line 2 of 3"
     assert by_prompt['What is the position of the line "third" in its paragraph?'] == "line 3 of 3"
     assert (
-        by_prompt["What is the position of the line with bounding box [0, 300, 1000, 550] in its paragraph?"]
-        == "line 2 of 3"
+        by_prompt["What is the position of the line with bounding box [0, 300, 1000, 550] in its paragraph?"] == "line 2 of 3"
     )
 
 

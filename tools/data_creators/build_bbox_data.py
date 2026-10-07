@@ -368,12 +368,7 @@ def to_doclang_locations(corners: tuple[int, int, int, int]) -> str:
         str: The four ``<location value="N"/>`` elements, concatenated.
     """
     x1, y1, x2, y2 = corners
-    return (
-        f'<location value="{x1}"/>'
-        f'<location value="{y1}"/>'
-        f'<location value="{x2}"/>'
-        f'<location value="{y2}"/>'
-    )
+    return f'<location value="{x1}"/>' f'<location value="{y1}"/>' f'<location value="{x2}"/>' f'<location value="{y2}"/>'
 
 
 def format_bbox(corners: tuple[int, int, int, int], bbox_format: str, size_wh: tuple[int, int]) -> str:
@@ -637,8 +632,7 @@ def build_region_to_transcription_candidates(
     if len(region.lines) < 2:
         return []
     prompt = (
-        f"Transcribe all text lines in the paragraph "
-        f"{format_bbox(region.bbox, bbox_format, size_wh)}, in reading order."
+        f"Transcribe all text lines in the paragraph " f"{format_bbox(region.bbox, bbox_format, size_wh)}, in reading order."
     )
     completion = "\n".join(line.text for line in region.lines)
     return [(prompt, completion)]
@@ -998,9 +992,7 @@ def main() -> None:
 
     input_dir = Path(args.input)
     image_dir = Path(args.images)
-    records, skipped = build_dataset(
-        input_dir, image_dir, args.mode, args.bbox_format, args.max_lines, args.seed, args.max_n
-    )
+    records, skipped = build_dataset(input_dir, image_dir, args.mode, args.bbox_format, args.max_lines, args.seed, args.max_n)
 
     dataset = Dataset.from_list(records)
     dataset.save_to_disk(args.output)
