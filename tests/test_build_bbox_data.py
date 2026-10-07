@@ -35,6 +35,9 @@ from tools.data_creators.build_bbox_data import (
     to_qwen_bbox,
 )
 
+# The coordinate-space sentence appended to qwen prompts (see _coord_space_note).
+QWEN_NOTE = " All bounding-box coordinates are integers normalized to the 0-1000 range."
+
 
 def _make_image(path: Path) -> None:
     """Create a tiny test image at the given path."""
@@ -381,7 +384,7 @@ def test_build_sft_record_bbox_to_text_qwen(tmp_path: Path) -> None:
     record = build_sft_record("bbox_to_text", "qwen", "hello", (10, 20, 60, 100), (100, 200), image_path)
     content = record["prompt"][0]["content"]
     assert content[0] == {"type": "image"}
-    assert content[1]["text"] == "Transcribe the text inside the bounding box [100, 100, 600, 500]."
+    assert content[1]["text"] == "Transcribe the text inside the bounding box [100, 100, 600, 500]." + QWEN_NOTE
     assert _completion_text(record) == "hello"
     assert len(record["images"]) == 1
 
@@ -403,7 +406,7 @@ def test_build_sft_record_text_to_bbox_qwen(tmp_path: Path) -> None:
     image_path = tmp_path / "doc.png"
     _make_image(image_path)
     record = build_sft_record("text_to_bbox", "qwen", "hello", (10, 20, 60, 100), (100, 200), image_path)
-    assert _prompt_text(record) == 'Predict the bounding box for the text "hello".'
+    assert _prompt_text(record) == 'Predict the bounding box for the text "hello".' + QWEN_NOTE
     assert _completion_text(record) == "[100, 100, 600, 500]"
 
 
@@ -716,8 +719,11 @@ def test_build_line_neighbor_candidates_targets() -> None:
     assert by_prompt['What is the text of the 1st line above the line "second"?'] == "first"
     assert by_prompt['What is the text of the 1st line below the line "second"?'] == "third"
     assert by_prompt['What is the text of the 1st line above the line "third"?'] == "second"
-    assert by_prompt['What is the bounding box of the 1st line below the line "first"?'] == "[0, 300, 1000, 550]"
-    assert by_prompt["What is the text of the 1st line below the line with bounding box [0, 0, 1000, 250]?"] == "second"
+    assert by_prompt['What is the bounding box of the 1st line below the line "first"?' + QWEN_NOTE] == "[0, 300, 1000, 550]"
+    assert (
+        by_prompt["What is the text of the 1st line below the line with bounding box [0, 0, 1000, 250]?" + QWEN_NOTE]
+        == "second"
+    )
 
 
 def test_build_line_neighbor_candidates_max_n() -> None:
@@ -736,7 +742,9 @@ def test_build_region_to_lines_candidates() -> None:
     """The completion lists all line bboxes in reading order."""
     region = _three_line_region()
     prompt, completion = build_region_to_lines_candidates(region, "qwen", (100, 100))[0]
-    assert prompt == ("List the bounding boxes of all text lines in the paragraph [0, 0, 1000, 1000], in reading order.")
+    assert prompt == (
+        "List the bounding boxes of all text lines in the paragraph [0, 0, 1000, 1000], in reading order." + QWEN_NOTE
+    )
     assert completion == "[[0, 0, 1000, 250], [0, 300, 1000, 550], [0, 600, 1000, 850]]"
 
 
@@ -763,7 +771,7 @@ def test_build_lines_to_region_candidates() -> None:
     prompt, completion = build_lines_to_region_candidates(region, "qwen", (100, 100))[0]
     assert prompt == (
         "Given the text lines [[0, 0, 1000, 250], [0, 300, 1000, 550], [0, 600, 1000, 850]], "
-        "what is the bounding box of the paragraph they belong to?"
+        "what is the bounding box of the paragraph they belong to?" + QWEN_NOTE
     )
     assert completion == "[0, 0, 1000, 1000]"
 
@@ -777,7 +785,7 @@ def test_build_region_to_transcription_candidates() -> None:
     """The completion joins all lines' text with newlines in reading order."""
     region = _three_line_region()
     prompt, completion = build_region_to_transcription_candidates(region, "qwen", (100, 100))[0]
-    assert prompt == "Transcribe all text lines in the paragraph [0, 0, 1000, 1000], in reading order."
+    assert prompt == "Transcribe all text lines in the paragraph [0, 0, 1000, 1000], in reading order." + QWEN_NOTE
     assert completion == "first\nsecond\nthird"
 
 
@@ -796,7 +804,8 @@ def test_build_line_index_candidates() -> None:
     assert by_prompt['What is the position of the line "second" in its paragraph?'] == "line 2 of 3"
     assert by_prompt['What is the position of the line "third" in its paragraph?'] == "line 3 of 3"
     assert (
-        by_prompt["What is the position of the line with bounding box [0, 300, 1000, 550] in its paragraph?"] == "line 2 of 3"
+        by_prompt["What is the position of the line with bounding box [0, 300, 1000, 550] in its paragraph?" + QWEN_NOTE]
+        == "line 2 of 3"
     )
 
 
@@ -836,7 +845,7 @@ def test_build_line_count_candidates() -> None:
     """The completion is the number of lines in the region."""
     region = _three_line_region()
     prompt, completion = build_line_count_candidates(region, "qwen", (100, 100))[0]
-    assert prompt == "How many text lines are in the paragraph [0, 0, 1000, 1000]?"
+    assert prompt == "How many text lines are in the paragraph [0, 0, 1000, 1000]?" + QWEN_NOTE
     assert completion == "3"
 
 
@@ -898,7 +907,9 @@ def test_build_dataset_region_mode_line_neighbor(tmp_path: Path) -> None:
     assert by_prompt['What is the text of the 1st line below the line "alpha one"?'] == "alpha two"
     assert by_prompt['What is the text of the 1st line above the line "alpha two"?'] == "alpha one"
     assert by_prompt['What is the text of the 1st line below the line "beta one"?'] == "beta two"
-    assert by_prompt['What is the bounding box of the 1st line below the line "alpha one"?'] == "[0, 300, 1000, 500]"
+    assert (
+        by_prompt['What is the bounding box of the 1st line below the line "alpha one"?' + QWEN_NOTE] == "[0, 300, 1000, 500]"
+    )
 
 
 def test_build_dataset_region_mode_ignores_dclg(tmp_path: Path) -> None:

@@ -44,6 +44,10 @@ Bboxes are serialized in one of two formats:
   native (declared) coordinate space — teaches the model to emit correct
   DocLang.
 
+Prompts state the coordinate space explicitly (for ``qwen``, that coordinates
+are integers normalized to the 0-1000 range) so the model knows the convention
+to expect and to use in its answer.
+
 Normalization uses the source's declared size (PAGE XML
 ``imageWidth``/``imageHeight``; DocLang ``<default_resolution>``); when no
 declared size is available, the actual image size is used.
@@ -412,6 +416,26 @@ def format_bbox_list(
     return "[" + ", ".join(elements) + "]"
 
 
+def _coord_space_note(bbox_format: str) -> str:
+    """Return a sentence stating the coordinate space for the given bbox format.
+
+    Appended to prompts so the model knows the coordinate convention to expect
+    (and to use in its answer). Only the ``qwen`` format needs a note — its
+    coordinates are normalized to the 0-1000 range; ``doclang`` prompts already
+    name the ``<location>`` elements explicitly.
+
+    Args:
+        bbox_format (str): "qwen" or "doclang".
+
+    Returns:
+        str: A sentence (with a leading space) describing the coordinate space,
+        or an empty string when no note is needed.
+    """
+    if bbox_format == FORMAT_QWEN:
+        return " All bounding-box coordinates are integers normalized to the 0-1000 range."
+    return ""
+
+
 def _ordinal(n: int) -> str:
     """Format an integer as an English ordinal (1st, 2nd, 3rd, 4th, ...)."""
     if 10 <= n % 100 <= 20:
@@ -433,14 +457,15 @@ def _prompt_and_completion(mode: str, bbox_format: str, text: str, bbox_str: str
     Returns:
         tuple[str, str]: (prompt_text, completion_text).
     """
+    note = _coord_space_note(bbox_format)
     if mode == MODE_BBOX_TO_TEXT:
         if bbox_format == FORMAT_QWEN:
-            prompt = f"Transcribe the text inside the bounding box {bbox_str}."
+            prompt = f"Transcribe the text inside the bounding box {bbox_str}.{note}"
         else:
             prompt = f"Transcribe the text inside the element with these DocLang locations: {bbox_str}."
         return prompt, text
     if bbox_format == FORMAT_QWEN:
-        return f'Predict the bounding box for the text "{text}".', bbox_str
+        return f'Predict the bounding box for the text "{text}".{note}', bbox_str
     prompt = f'Emit the DocLang <text> element with its <location> coordinates for the text: "{text}".'
     return prompt, f"<text>{bbox_str}{text}</text>"
 
@@ -523,6 +548,7 @@ def build_line_neighbor_candidates(
         list[tuple[str, str]]: (prompt, completion) pairs.
     """
     candidates: list[tuple[str, str]] = []
+    note = _coord_space_note(bbox_format)
     n_lines = len(region.lines)
     for i, line in enumerate(region.lines):
         for direction in ("above", "below"):
@@ -532,19 +558,20 @@ def build_line_neighbor_candidates(
                     continue
                 target = region.lines[j]
                 references = (
-                    f'the line "{line.text}"',
-                    f"the line with bounding box {format_bbox(line.bbox, bbox_format, size_wh)}",
+                    (f'the line "{line.text}"', False),
+                    (f"the line with bounding box {format_bbox(line.bbox, bbox_format, size_wh)}", True),
                 )
-                for reference in references:
+                for reference, ref_has_bbox in references:
+                    text_note = note if ref_has_bbox else ""
                     candidates.append(
                         (
-                            f"What is the text of the {_ordinal(n)} line {direction} {reference}?",
+                            f"What is the text of the {_ordinal(n)} line {direction} {reference}?{text_note}",
                             target.text,
                         )
                     )
                     candidates.append(
                         (
-                            f"What is the bounding box of the {_ordinal(n)} line {direction} {reference}?",
+                            f"What is the bounding box of the {_ordinal(n)} line {direction} {reference}?{note}",
                             format_bbox(target.bbox, bbox_format, size_wh),
                         )
                     )
@@ -575,6 +602,7 @@ def build_region_to_lines_candidates(
     prompt = (
         f"List the bounding boxes of all text lines in the paragraph "
         f"{format_bbox(region.bbox, bbox_format, size_wh)}, in reading order."
+        f"{_coord_space_note(bbox_format)}"
     )
     completion = format_bbox_list([line.bbox for line in region.lines], bbox_format, size_wh)
     return [(prompt, completion)]
@@ -605,6 +633,7 @@ def build_lines_to_region_candidates(
         f"Given the text lines "
         f"{format_bbox_list([line.bbox for line in region.lines], bbox_format, size_wh)}, "
         f"what is the bounding box of the paragraph they belong to?"
+        f"{_coord_space_note(bbox_format)}"
     )
     completion = format_bbox(region.bbox, bbox_format, size_wh)
     return [(prompt, completion)]
@@ -632,7 +661,9 @@ def build_region_to_transcription_candidates(
     if len(region.lines) < 2:
         return []
     prompt = (
-        f"Transcribe all text lines in the paragraph " f"{format_bbox(region.bbox, bbox_format, size_wh)}, in reading order."
+        f"Transcribe all text lines in the paragraph "
+        f"{format_bbox(region.bbox, bbox_format, size_wh)}, in reading order."
+        f"{_coord_space_note(bbox_format)}"
     )
     completion = "\n".join(line.text for line in region.lines)
     return [(prompt, completion)]
@@ -660,6 +691,7 @@ def build_line_index_candidates(
     n_lines = len(region.lines)
     if n_lines < 2:
         return []
+    note = _coord_space_note(bbox_format)
     candidates: list[tuple[str, str]] = []
     for i, line in enumerate(region.lines):
         position = f"line {i + 1} of {n_lines}"
@@ -667,7 +699,7 @@ def build_line_index_candidates(
         candidates.append(
             (
                 f"What is the position of the line with bounding box "
-                f"{format_bbox(line.bbox, bbox_format, size_wh)} in its paragraph?",
+                f"{format_bbox(line.bbox, bbox_format, size_wh)} in its paragraph?{note}",
                 position,
             )
         )
@@ -709,6 +741,7 @@ def build_line_ordering_candidates(
         f"These are the text lines of a paragraph in random order: "
         f"{format_bbox_list(presented, bbox_format, size_wh)}. "
         f"Give their reading order as 1-based indices."
+        f"{_coord_space_note(bbox_format)}"
     )
     completion = ", ".join(str(shuffled.index(position) + 1) for position in order)
     return [(prompt, completion)]
@@ -732,7 +765,10 @@ def build_line_count_candidates(
     Returns:
         list[tuple[str, str]]: (prompt, completion) pairs.
     """
-    prompt = f"How many text lines are in the paragraph {format_bbox(region.bbox, bbox_format, size_wh)}?"
+    prompt = (
+        f"How many text lines are in the paragraph {format_bbox(region.bbox, bbox_format, size_wh)}?"
+        f"{_coord_space_note(bbox_format)}"
+    )
     completion = str(len(region.lines))
     return [(prompt, completion)]
 

@@ -171,7 +171,7 @@ document order of the lines within a `TextRegion`):
 
 Two bbox serializations (`--bbox-format`):
 
-- `qwen` — `[x1, y1, x2, y2]` integers normalized to the 0–1000 range (the Qwen-VL grounding convention).
+- `qwen` — `[x1, y1, x2, y2]` integers normalized to the 0–1000 range (the Qwen-VL grounding convention). Every prompt that involves a box states that coordinates are integers in the 0–1000 range, so the model knows the convention to expect and to use in its answer.
 - `doclang` — the four `<location value="N"/>` elements in the document's native coordinate space (teaches the model to emit correct DocLang).
 
 Tasks that emit several boxes serialize them as a `[[x1, y1, x2, y2], ...]`

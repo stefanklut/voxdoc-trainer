@@ -123,7 +123,10 @@ To teach the model to ground text in bounding boxes — or to predict a bounding
 box for a line of text — build SFT examples from PAGE XML and/or DocLang files
 and their source images. Choose the task with `--mode` and the bbox
 serialization with `--bbox-format` (`qwen` for `[x1, y1, x2, y2]` in 0–1000
-space, or `doclang` for the four `<location>` elements).
+space, or `doclang` for the four `<location>` elements). With `qwen`, every
+prompt that involves a box states that coordinates are integers normalized to
+the 0–1000 range, so the model knows the convention to expect and to use in its
+answer.
 
 Line-level modes (PAGE XML and DocLang):
 
