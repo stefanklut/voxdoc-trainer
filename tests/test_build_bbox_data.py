@@ -2,18 +2,33 @@
 
 from __future__ import annotations
 
+import random
+import re
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from tools.data_creators.build_bbox_data import (
+    RegionData,
+    TextLineData,
+    _ordinal,
     build_dataset,
+    build_line_count_candidates,
+    build_line_index_candidates,
+    build_line_neighbor_candidates,
+    build_line_ordering_candidates,
+    build_lines_to_region_candidates,
+    build_region_to_lines_candidates,
+    build_region_to_transcription_candidates,
     build_sft_record,
     declared_size,
     extract_doclang_pairs,
     extract_page_xml_pairs,
+    extract_page_xml_regions,
     find_image,
+    format_bbox,
+    format_bbox_list,
     format_qwen_bbox,
     polygon_to_bbox,
     to_doclang_locations,
@@ -56,6 +71,52 @@ def _make_page_xml(path: Path, lines: list[tuple[str, str | None, str]]) -> None
         '      <Coords points="0,0 100,0 100,100 0,100"/>\n'
         f"{lines_block}\n"
         "    </TextRegion>\n"
+        "  </Page>\n"
+        "</PcGts>\n"
+    )
+    path.write_text(xml, encoding="utf-8")
+
+
+def _make_page_xml_regions(
+    path: Path,
+    regions: list[tuple[str, str, list[tuple[str, str | None, str]]]],
+) -> None:
+    """Write a minimal PAGE XML file with the given text regions.
+
+    Args:
+        path (Path): Where to write the XML file.
+        regions (list[tuple[str, str, list[tuple[str, str | None, str]]]]): (region_id, region_points, lines)
+            tuples in document order, where lines are (line_id, coords_points, text) tuples and
+            ``coords_points=None`` omits the ``Coords`` element.
+    """
+    region_blocks = []
+    for region_id, region_points, lines in regions:
+        line_blocks = []
+        for line_id, points, text in lines:
+            coords = f'\n        <Coords points="{points}"/>' if points is not None else ""
+            line_blocks.append(
+                f'      <TextLine id="{line_id}">{coords}\n'
+                f"        <TextEquiv><Unicode>{text}</Unicode></TextEquiv>\n"
+                f"      </TextLine>"
+            )
+        lines_block = "\n".join(line_blocks)
+        region_blocks.append(
+            f'    <TextRegion id="{region_id}">\n'
+            f'      <Coords points="{region_points}"/>\n'
+            f"{lines_block}\n"
+            f"    </TextRegion>"
+        )
+    regions_block = "\n".join(region_blocks)
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">\n'
+        "  <Metadata>\n"
+        "    <Creator>test</Creator>\n"
+        "    <Created>2024-01-01T00:00:00</Created>\n"
+        "    <LastChange>2024-01-01T00:00:00</LastChange>\n"
+        "  </Metadata>\n"
+        '  <Page imageFilename="doc.png" imageWidth="100" imageHeight="100">\n'
+        f"{regions_block}\n"
         "  </Page>\n"
         "</PcGts>\n"
     )
@@ -496,4 +557,422 @@ def test_build_dataset_sampling_is_reproducible_with_seed(tmp_path: Path) -> Non
     images = _make_pool(tmp_path, 3, 4)
     records_a, _ = build_dataset(tmp_path, images, "bbox_to_text", "qwen", max_lines=5, seed=42)
     records_b, _ = build_dataset(tmp_path, images, "bbox_to_text", "qwen", max_lines=5, seed=42)
+    assert [_completion_text(r) for r in records_a] == [_completion_text(r) for r in records_b]
+
+
+# --------------------------------------------------------------------------- #
+# extract_page_xml_regions
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_page_xml_regions(tmp_path: Path) -> None:
+    """Each TextRegion yields a RegionData with its lines in document order."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_regions(
+        xml_path,
+        [
+            (
+                "r1",
+                "0,0 100,0 100,50 0,50",
+                [
+                    ("l1", "0,0 100,0 100,25 0,25", "first line"),
+                    ("l2", "0,30 80,30 80,50 0,50", "second line"),
+                ],
+            ),
+            (
+                "r2",
+                "0,60 100,60 100,100 0,100",
+                [("l3", "0,60 100,60 100,85 0,85", "third line")],
+            ),
+        ],
+    )
+    regions = extract_page_xml_regions(xml_path)
+    assert len(regions) == 2
+    assert regions[0].bbox == (0, 0, 100, 50)
+    assert [(line.text, line.bbox) for line in regions[0].lines] == [
+        ("first line", (0, 0, 100, 25)),
+        ("second line", (0, 30, 80, 50)),
+    ]
+    assert regions[1].bbox == (0, 60, 100, 100)
+    assert [(line.text, line.bbox) for line in regions[1].lines] == [
+        ("third line", (0, 60, 100, 85)),
+    ]
+
+
+def test_extract_page_xml_regions_skips_line_without_coords(tmp_path: Path) -> None:
+    """A line without a Coords polygon is skipped; the region is kept."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_regions(
+        xml_path,
+        [
+            (
+                "r1",
+                "0,0 100,0 100,100 0,100",
+                [
+                    ("l1", None, "no coords"),
+                    ("l2", "0,30 80,30 80,55 0,55", "kept"),
+                ],
+            ),
+        ],
+    )
+    regions = extract_page_xml_regions(xml_path)
+    assert len(regions) == 1
+    assert [(line.text, line.bbox) for line in regions[0].lines] == [("kept", (0, 30, 80, 55))]
+
+
+def test_extract_page_xml_regions_skips_region_without_usable_lines(tmp_path: Path) -> None:
+    """A region whose lines all lack text or coords is skipped."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_regions(
+        xml_path,
+        [
+            (
+                "r1",
+                "0,0 100,0 100,50 0,50",
+                [
+                    ("l1", None, "no coords"),
+                    ("l2", "0,30 80,30 80,50 0,50", "   "),
+                ],
+            ),
+            (
+                "r2",
+                "0,60 100,60 100,100 0,100",
+                [("l3", "0,60 100,60 100,85 0,85", "kept")],
+            ),
+        ],
+    )
+    regions = extract_page_xml_regions(xml_path)
+    assert len(regions) == 1
+    assert regions[0].bbox == (0, 60, 100, 100)
+
+
+# --------------------------------------------------------------------------- #
+# format_bbox / format_bbox_list / _ordinal
+# --------------------------------------------------------------------------- #
+
+
+def test_format_bbox_qwen() -> None:
+    """qwen format normalizes to the 0-1000 range."""
+    assert format_bbox((10, 20, 60, 100), "qwen", (100, 200)) == "[100, 100, 600, 500]"
+
+
+def test_format_bbox_doclang() -> None:
+    """doclang format emits the four <location> elements in native space."""
+    assert format_bbox((10, 20, 110, 45), "doclang", (100, 200)) == (
+        '<location value="10"/><location value="20"/><location value="110"/><location value="45"/>'
+    )
+
+
+def test_format_bbox_list_qwen() -> None:
+    """A list of boxes serializes as an array of normalized boxes."""
+    assert format_bbox_list([(10, 20, 60, 100), (0, 0, 100, 200)], "qwen", (100, 200)) == (
+        "[[100, 100, 600, 500], [0, 0, 1000, 1000]]"
+    )
+
+
+def test_format_bbox_list_doclang() -> None:
+    """In doclang format the list uses native-space integers."""
+    assert format_bbox_list([(10, 20, 60, 100), (0, 0, 100, 200)], "doclang", (100, 200)) == (
+        "[[10, 20, 60, 100], [0, 0, 100, 200]]"
+    )
+
+
+def test_ordinal() -> None:
+    """Ordinals handle the st/nd/rd/th cases including the teens."""
+    assert _ordinal(1) == "1st"
+    assert _ordinal(2) == "2nd"
+    assert _ordinal(3) == "3rd"
+    assert _ordinal(4) == "4th"
+    assert _ordinal(11) == "11th"
+    assert _ordinal(22) == "22nd"
+
+
+# --------------------------------------------------------------------------- #
+# region-mode candidate builders
+# --------------------------------------------------------------------------- #
+
+
+def _three_line_region() -> RegionData:
+    return RegionData(
+        bbox=(0, 0, 100, 100),
+        lines=[
+            TextLineData(text="first", bbox=(0, 0, 100, 25)),
+            TextLineData(text="second", bbox=(0, 30, 100, 55)),
+            TextLineData(text="third", bbox=(0, 60, 100, 85)),
+        ],
+    )
+
+
+def _single_line_region() -> RegionData:
+    return RegionData(bbox=(0, 0, 100, 100), lines=[TextLineData(text="only", bbox=(0, 0, 100, 25))])
+
+
+def test_build_line_neighbor_candidates_targets() -> None:
+    """Each candidate targets the correct offset line in the correct direction."""
+    region = _three_line_region()
+    candidates = build_line_neighbor_candidates(region, "qwen", (100, 100), max_n=1)
+    # 4 valid (line, direction, n) combos x 2 references x 2 outputs = 16
+    assert len(candidates) == 16
+    by_prompt = {prompt: completion for prompt, completion in candidates}
+    assert by_prompt['What is the text of the 1st line below the line "first"?'] == "second"
+    assert by_prompt['What is the text of the 1st line above the line "second"?'] == "first"
+    assert by_prompt['What is the text of the 1st line below the line "second"?'] == "third"
+    assert by_prompt['What is the text of the 1st line above the line "third"?'] == "second"
+    assert by_prompt['What is the bounding box of the 1st line below the line "first"?'] == "[0, 300, 1000, 550]"
+    assert (
+        by_prompt["What is the text of the 1st line below the line with bounding box [0, 0, 1000, 250]?"]
+        == "second"
+    )
+
+
+def test_build_line_neighbor_candidates_max_n() -> None:
+    """max_n=2 adds the second-neighbor candidates with the right ordinal."""
+    region = _three_line_region()
+    candidates = build_line_neighbor_candidates(region, "qwen", (100, 100), max_n=2)
+    # 6 valid (line, direction, n) combos x 4 variants = 24
+    assert len(candidates) == 24
+    by_prompt = {prompt: completion for prompt, completion in candidates}
+    assert by_prompt['What is the text of the 2nd line below the line "first"?'] == "third"
+    assert by_prompt['What is the text of the 2nd line above the line "third"?'] == "first"
+    assert not any("3rd line" in prompt for prompt, _ in candidates)
+
+
+def test_build_region_to_lines_candidates() -> None:
+    """The completion lists all line bboxes in reading order."""
+    region = _three_line_region()
+    prompt, completion = build_region_to_lines_candidates(region, "qwen", (100, 100))[0]
+    assert prompt == (
+        "List the bounding boxes of all text lines in the paragraph [0, 0, 1000, 1000], in reading order."
+    )
+    assert completion == "[[0, 0, 1000, 250], [0, 300, 1000, 550], [0, 600, 1000, 850]]"
+
+
+def test_build_region_to_lines_candidates_doclang() -> None:
+    """doclang format uses the region locations and native-space list."""
+    region = _three_line_region()
+    prompt, completion = build_region_to_lines_candidates(region, "doclang", (100, 100))[0]
+    assert prompt == (
+        "List the bounding boxes of all text lines in the paragraph "
+        '<location value="0"/><location value="0"/><location value="100"/><location value="100"/>, '
+        "in reading order."
+    )
+    assert completion == "[[0, 0, 100, 25], [0, 30, 100, 55], [0, 60, 100, 85]]"
+
+
+def test_build_region_to_lines_candidates_skips_single_line() -> None:
+    """A region with a single line yields no candidates."""
+    assert build_region_to_lines_candidates(_single_line_region(), "qwen", (100, 100)) == []
+
+
+def test_build_lines_to_region_candidates() -> None:
+    """The completion is the region bbox; the prompt lists the line bboxes."""
+    region = _three_line_region()
+    prompt, completion = build_lines_to_region_candidates(region, "qwen", (100, 100))[0]
+    assert prompt == (
+        "Given the text lines [[0, 0, 1000, 250], [0, 300, 1000, 550], [0, 600, 1000, 850]], "
+        "what is the bounding box of the paragraph they belong to?"
+    )
+    assert completion == "[0, 0, 1000, 1000]"
+
+
+def test_build_lines_to_region_candidates_skips_single_line() -> None:
+    """A region with a single line yields no candidates."""
+    assert build_lines_to_region_candidates(_single_line_region(), "qwen", (100, 100)) == []
+
+
+def test_build_region_to_transcription_candidates() -> None:
+    """The completion joins all lines' text with newlines in reading order."""
+    region = _three_line_region()
+    prompt, completion = build_region_to_transcription_candidates(region, "qwen", (100, 100))[0]
+    assert prompt == "Transcribe all text lines in the paragraph [0, 0, 1000, 1000], in reading order."
+    assert completion == "first\nsecond\nthird"
+
+
+def test_build_region_to_transcription_candidates_skips_single_line() -> None:
+    """A region with a single line yields no candidates."""
+    assert build_region_to_transcription_candidates(_single_line_region(), "qwen", (100, 100)) == []
+
+
+def test_build_line_index_candidates() -> None:
+    """Each line yields a text-reference and a bbox-reference candidate."""
+    region = _three_line_region()
+    candidates = build_line_index_candidates(region, "qwen", (100, 100))
+    assert len(candidates) == 6
+    by_prompt = {prompt: completion for prompt, completion in candidates}
+    assert by_prompt['What is the position of the line "first" in its paragraph?'] == "line 1 of 3"
+    assert by_prompt['What is the position of the line "second" in its paragraph?'] == "line 2 of 3"
+    assert by_prompt['What is the position of the line "third" in its paragraph?'] == "line 3 of 3"
+    assert (
+        by_prompt["What is the position of the line with bounding box [0, 300, 1000, 550] in its paragraph?"]
+        == "line 2 of 3"
+    )
+
+
+def test_build_line_index_candidates_skips_single_line() -> None:
+    """A region with a single line yields no candidates."""
+    assert build_line_index_candidates(_single_line_region(), "qwen", (100, 100)) == []
+
+
+def test_build_line_ordering_candidates_roundtrip() -> None:
+    """The completion maps the presented (shuffled) boxes back to reading order."""
+    region = _three_line_region()
+    rng = random.Random(0)
+    prompt, completion = build_line_ordering_candidates(region, "qwen", (100, 100), rng)[0]
+    presented = [tuple(map(int, box)) for box in re.findall(r"\[(\d+), (\d+), (\d+), (\d+)\]", prompt)]
+    assert len(presented) == 3
+    # the presented order must actually be shuffled
+    assert presented != [tuple(to_qwen_bbox(line.bbox, (100, 100))) for line in region.lines]
+    answer = [int(index) for index in completion.split(",")]
+    assert sorted(answer) == [1, 2, 3]
+    for position, line in enumerate(region.lines):
+        assert presented[answer[position] - 1] == tuple(to_qwen_bbox(line.bbox, (100, 100)))
+
+
+def test_build_line_ordering_candidates_requires_three_lines() -> None:
+    """Regions with fewer than three lines yield no candidates."""
+    region = RegionData(
+        bbox=(0, 0, 100, 100),
+        lines=[
+            TextLineData(text="a", bbox=(0, 0, 100, 25)),
+            TextLineData(text="b", bbox=(0, 30, 100, 55)),
+        ],
+    )
+    assert build_line_ordering_candidates(region, "qwen", (100, 100), random.Random(0)) == []
+
+
+def test_build_line_count_candidates() -> None:
+    """The completion is the number of lines in the region."""
+    region = _three_line_region()
+    prompt, completion = build_line_count_candidates(region, "qwen", (100, 100))[0]
+    assert prompt == "How many text lines are in the paragraph [0, 0, 1000, 1000]?"
+    assert completion == "3"
+
+
+# --------------------------------------------------------------------------- #
+# build_dataset — region-based modes
+# --------------------------------------------------------------------------- #
+
+
+def _make_region_pool(tmp_path: Path) -> Path:
+    """Create a PAGE XML file with two regions (3 and 2 lines) plus an image."""
+    images = tmp_path / "images"
+    images.mkdir()
+    _make_page_xml_regions(
+        tmp_path / "doc.xml",
+        [
+            (
+                "r1",
+                "0,0 100,0 100,50 0,50",
+                [
+                    ("l1", "0,0 100,0 100,25 0,25", "alpha one"),
+                    ("l2", "0,30 100,30 100,50 0,50", "alpha two"),
+                    ("l3", "10,10 50,10 50,20 10,20", "alpha three"),
+                ],
+            ),
+            (
+                "r2",
+                "0,60 100,60 100,100 0,100",
+                [
+                    ("l4", "0,60 100,60 100,80 0,80", "beta one"),
+                    ("l5", "0,85 100,85 100,100 0,100", "beta two"),
+                ],
+            ),
+        ],
+    )
+    _make_image(images / "doc.png")
+    return images
+
+
+def test_build_dataset_region_mode_region_to_lines(tmp_path: Path) -> None:
+    """region_to_lines emits one record per region with >=2 lines."""
+    images = _make_region_pool(tmp_path)
+    records, skipped = build_dataset(tmp_path, images, "region_to_lines", "qwen")
+    assert skipped == 0
+    assert len(records) == 2
+    assert sorted(_completion_text(record) for record in records) == [
+        "[[0, 0, 1000, 250], [0, 300, 1000, 500], [100, 100, 500, 200]]",
+        "[[0, 600, 1000, 800], [0, 850, 1000, 1000]]",
+    ]
+
+
+def test_build_dataset_region_mode_line_neighbor(tmp_path: Path) -> None:
+    """line_neighbor emits prompt/completion pairs with the correct targets."""
+    images = _make_region_pool(tmp_path)
+    records, skipped = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_n=1)
+    assert skipped == 0
+    # r1: 4 combos x 4 variants; r2: 2 combos x 4 variants
+    assert len(records) == 24
+    by_prompt = {_prompt_text(r): _completion_text(r) for r in records}
+    assert by_prompt['What is the text of the 1st line below the line "alpha one"?'] == "alpha two"
+    assert by_prompt['What is the text of the 1st line above the line "alpha two"?'] == "alpha one"
+    assert by_prompt['What is the text of the 1st line below the line "beta one"?'] == "beta two"
+    assert by_prompt['What is the bounding box of the 1st line below the line "alpha one"?'] == "[0, 300, 1000, 500]"
+
+
+def test_build_dataset_region_mode_ignores_dclg(tmp_path: Path) -> None:
+    """Region-based modes only process .xml files."""
+    images = _make_region_pool(tmp_path)
+    _make_doclang(
+        tmp_path / "other.dclg",
+        '<text><location value="0"/><location value="0"/><location value="100"/><location value="50"/>ignored</text>',
+        default_resolution=(100, 100),
+    )
+    records, skipped = build_dataset(tmp_path, images, "line_count", "qwen")
+    assert skipped == 0
+    assert len(records) == 2
+    assert sorted(_completion_text(r) for r in records) == ["2", "3"]
+
+
+def test_build_dataset_region_mode_skips_file_without_image(tmp_path: Path) -> None:
+    """A .xml file with regions but no matching image is skipped."""
+    _make_page_xml_regions(
+        tmp_path / "doc.xml",
+        [
+            (
+                "r1",
+                "0,0 100,0 100,100 0,100",
+                [
+                    ("l1", "0,0 100,0 100,25 0,25", "a"),
+                    ("l2", "0,30 100,30 100,55 0,55", "b"),
+                ],
+            ),
+        ],
+    )
+    images = tmp_path / "images"
+    images.mkdir()
+    records, skipped = build_dataset(tmp_path, images, "line_count", "qwen")
+    assert skipped == 1
+    assert records == []
+
+
+def test_build_dataset_region_mode_skips_malformed_xml(tmp_path: Path) -> None:
+    """A .xml file that is not well-formed is skipped, not fatal."""
+    images = _make_region_pool(tmp_path)
+    (tmp_path / "bad.xml").write_text("<not-closed", encoding="utf-8")
+    records, skipped = build_dataset(tmp_path, images, "line_count", "qwen")
+    assert skipped == 1
+    assert len(records) == 2
+
+
+def test_build_dataset_region_mode_skips_single_line_regions(tmp_path: Path) -> None:
+    """region_to_lines emits no records when all regions have a single line."""
+    images = tmp_path / "images"
+    images.mkdir()
+    _make_page_xml_regions(
+        tmp_path / "doc.xml",
+        [("r1", "0,0 100,0 100,100 0,100", [("l1", "0,0 100,0 100,25 0,25", "only")])],
+    )
+    _make_image(images / "doc.png")
+    records, skipped = build_dataset(tmp_path, images, "region_to_lines", "qwen")
+    assert skipped == 0
+    assert records == []
+
+
+def test_build_dataset_region_mode_sampling_is_reproducible(tmp_path: Path) -> None:
+    """line_neighbor with max_lines + seed samples a reproducible subset."""
+    images = _make_region_pool(tmp_path)
+    records_a, _ = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_lines=5, seed=42)
+    records_b, _ = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_lines=5, seed=42)
+    assert len(records_a) == 5
+    assert [_prompt_text(r) for r in records_a] == [_prompt_text(r) for r in records_b]
     assert [_completion_text(r) for r in records_a] == [_completion_text(r) for r in records_b]

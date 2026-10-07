@@ -121,16 +121,35 @@ python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ 
 
 To teach the model to ground text in bounding boxes — or to predict a bounding
 box for a line of text — build SFT examples from PAGE XML and/or DocLang files
-and their source images. Choose the task with `--mode` (`bbox_to_text` or
-`text_to_bbox`) and the bbox serialization with `--bbox-format` (`qwen` for
-`[x1, y1, x2, y2]` in 0–1000 space, or `doclang` for the four `<location>`
-elements). Use `--max-lines` to randomly sample at most N (text, bbox) pairs
-from the global pool of all input files (`--seed` makes the selection
-reproducible). Files that cannot be parsed, that contain no usable pairs, or
-that have no matching image are skipped:
+and their source images. Choose the task with `--mode` and the bbox
+serialization with `--bbox-format` (`qwen` for `[x1, y1, x2, y2]` in 0–1000
+space, or `doclang` for the four `<location>` elements).
+
+Line-level modes (PAGE XML and DocLang):
+
+- `bbox_to_text` — the model sees the image and a bounding box and must produce the text inside it.
+- `text_to_bbox` — the model sees the image and a line of text and must produce the bounding box.
+
+Region-based modes (PAGE XML only; the reading order is the document order of
+the lines within a `TextRegion`):
+
+- `line_neighbor` — given a line (by text or bbox) and an offset, produce the text or bbox of the Nth line above/below it (`--max-n` bounds the offset, default 3).
+- `region_to_lines` — given a paragraph's bbox, list all its line bboxes in reading order.
+- `lines_to_region` — given a paragraph's line bboxes, produce the paragraph's bbox.
+- `region_to_transcription` — given a paragraph's bbox, transcribe all its lines in reading order.
+- `line_index` — given a line (by text or bbox), state its position, e.g. "line 3 of 7".
+- `line_ordering` — given a paragraph's line bboxes in shuffled order, give the reading order as 1-based indices.
+- `line_count` — given a paragraph's bbox, state how many lines it contains.
+
+Tasks that emit several boxes serialize them as a `[[x1, y1, x2, y2], ...]`
+array in the `--bbox-format` coordinate space. Use `--max-lines` to randomly
+sample at most N examples from the global pool of all input files (`--seed`
+makes the selection reproducible). Files that cannot be parsed, that contain
+no usable pairs, or that have no matching image are skipped:
 
 ```bash
 python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen --max-lines 5000 --seed 42
+python tools/data_creators/build_bbox_data.py --input path/to/pagexml/ --images path/to/images/ --output data/structure --mode line_neighbor --bbox-format qwen --max-n 3
 ```
 
 ## Dry-run / smoke mode

@@ -149,27 +149,39 @@ python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ 
 
 Build SFT training data that teaches the model to ground text in bounding boxes
 (and vice versa). The tool reads a directory of PAGE XML (`.xml`) and DocLang
-(`.dclg`) files and their source images, and emits one SFT example per text
-line: PAGE XML `TextLine` polygons are fit to bounding boxes, and DocLang
-`<text>` elements use their four `<location>` values (interpreted as
-`x_min, y_min, x_max, y_max`, per the DocLang spec).
+(`.dclg`) files and their source images: PAGE XML `TextLine` polygons are fit
+to bounding boxes, and DocLang `<text>` elements use their four `<location>`
+values (interpreted as `x_min, y_min, x_max, y_max`, per the DocLang spec).
 
-Two task modes (`--mode`):
+Line-level task modes (`--mode`, PAGE XML and DocLang):
 
 - `bbox_to_text` — the model sees the image and a bounding box and must produce the text inside it.
 - `text_to_bbox` — the model sees the image and a line of text and must produce the bounding box.
+
+Region-based task modes (`--mode`, PAGE XML only — the reading order is the
+document order of the lines within a `TextRegion`):
+
+- `line_neighbor` — given a line (by text or bbox) and an offset, produce the text or bbox of the Nth line above/below it (`--max-n` bounds the offset, default 3).
+- `region_to_lines` — given a paragraph's bbox, list all its line bboxes in reading order.
+- `lines_to_region` — given a paragraph's line bboxes, produce the paragraph's bbox.
+- `region_to_transcription` — given a paragraph's bbox, transcribe all its lines in reading order.
+- `line_index` — given a line (by text or bbox), state its position, e.g. "line 3 of 7".
+- `line_ordering` — given a paragraph's line bboxes in shuffled order, give the reading order as 1-based indices.
+- `line_count` — given a paragraph's bbox, state how many lines it contains.
 
 Two bbox serializations (`--bbox-format`):
 
 - `qwen` — `[x1, y1, x2, y2]` integers normalized to the 0–1000 range (the Qwen-VL grounding convention).
 - `doclang` — the four `<location value="N"/>` elements in the document's native coordinate space (teaches the model to emit correct DocLang).
 
-Normalization uses the source's declared size (PAGE XML `imageWidth`/
-`imageHeight`; DocLang `<default_resolution>`), falling back to the actual
-image size. When the total number of (text, bbox) pairs across all input files
-exceeds `--max-lines`, a random subset of that size is sampled globally
-(`--seed` makes the selection reproducible). Files that cannot be parsed, that
-contain no usable pairs, or that have no matching image are skipped:
+Tasks that emit several boxes serialize them as a `[[x1, y1, x2, y2], ...]`
+array in the `--bbox-format` coordinate space. Normalization uses the source's
+declared size (PAGE XML `imageWidth`/`imageHeight`; DocLang
+`<default_resolution>`), falling back to the actual image size. When the total
+number of candidates across all input files exceeds `--max-lines`, a random
+subset of that size is sampled globally (`--seed` makes the selection
+reproducible). Files that cannot be parsed, that contain no usable pairs, or
+that have no matching image are skipped:
 
 ```bash
 python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen
