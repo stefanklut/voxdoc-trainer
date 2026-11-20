@@ -9,14 +9,18 @@ Supported source formats (JSONL). Each row may use either a structured
 - SFT:  {"messages": [...], "completion": "..."}
 - DPO:  {"messages": [...], "chosen": "...", "rejected": "..."}
 - KTO:  {"messages": [...], "completion": "...", "label": true}
-- GRPO: {"messages": [...]}
+- GRPO: {"messages": [...], "ground_truth": "..."}
 
 Legacy single-turn rows remain supported:
 
 - SFT:  {"image": "path.png", "prompt": "...", "completion": "..."}
 - DPO:  {"image": "path.png", "prompt": "...", "chosen": "...", "rejected": "..."}
 - KTO:  {"image": "path.png", "prompt": "...", "completion": "...", "label": true}
-- GRPO: {"image": "path.png", "prompt": "..."}
+- GRPO: {"image": "path.png", "prompt": "...", "ground_truth": "..."}
+
+For GRPO, ``ground_truth`` is the answer the reward functions score generated
+completions against (see :mod:`src.rewards`). It is kept as a dataset column so
+the rewards can read it at training time.
 
 A message `content` may be a plain string or a list of content blocks. Image
 blocks use `{"type": "image", "image": "path.png"}`; the actual PIL image is
@@ -93,6 +97,8 @@ def _validate_row(row: dict, method: str) -> None:
             raise ValueError("KTO rows require `completion` and `label` fields.")
         if not isinstance(row["label"], bool):
             raise ValueError("KTO `label` must be a boolean.")
+    if method == "grpo" and "ground_truth" not in row:
+        raise ValueError("GRPO rows require a `ground_truth` field (the answer the reward scores against).")
 
 
 def _build_prompt(row: dict) -> tuple[list[dict], list]:
@@ -164,12 +170,16 @@ def to_kto(rows: list[dict]) -> Dataset:
 
 
 def to_grpo(rows: list[dict]) -> Dataset:
-    """Convert feedback rows to GRPO prompt format."""
+    """Convert feedback rows to GRPO prompt format.
+
+    The ``ground_truth`` column is carried through so the reward functions can
+    score generated completions against it (see :mod:`src.rewards`).
+    """
     records = []
     for row in rows:
         _validate_row(row, "grpo")
         prompt, images = _build_prompt(row)
-        records.append({"prompt": prompt, "images": images})
+        records.append({"prompt": prompt, "images": images, "ground_truth": row["ground_truth"]})
     return Dataset.from_list(records)
 
 

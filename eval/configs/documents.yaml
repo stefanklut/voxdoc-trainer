@@ -1,0 +1,14 @@
+data:
+  format: manifest
+  path: ../../data/evaluation.jsonl
+model: Qwen/Qwen3.5-9B
+base_url: http://localhost:8000/v1
+output_dir: ../../outputs/evaluation
+comparison: grid_vs_native
+seeds: [0, 1, 2, 3, 4]
+temperature: 0.7
+top_p: 1.0
+max_tokens: 2048
+send_seed: true
+enable_thinking: false
+iou_threshold: 0.5

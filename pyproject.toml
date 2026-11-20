@@ -28,6 +28,7 @@ dependencies = [
     "python-dotenv",
     "pydantic",
     "openai",
+    "scipy",
 ]
 
 [project.optional-dependencies]
@@ -48,4 +49,7 @@ markers = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["src*", "utils*"]
+include = ["src*", "utils*", "eval*"]
+
+[tool.setuptools.package-data]
+eval = ["configs/*.yaml"]

@@ -1,0 +1,65 @@
+# GRPO pretrain config — learn Old Dutch by optimizing CER directly.
+# Pretraining stage: starts from the base model (before SFT) and uses the
+# CER reward (src/rewards_pretrain.py) instead of the finetune format +
+# accuracy rewards. Point model_id at a light SFT warm-start if the base
+# model cannot yet produce reasonable transcriptions.
+method: grpo
+model:
+  model_id: Qwen/Qwen3.5-9B
+  trust_remote_code: false
+  dtype: bfloat16
+  use_qlora: false
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules: [q_proj, v_proj, k_proj, o_proj]
+  lora_bias: none
+  router_aux_loss_coef: 0.001
+data:
+  train_path: data/train_grpo_pretrain
+  max_length: null
+  dataset_num_proc: 4
+  shuffle: true
+  pad_to_multiple_of: null
+training:
+  output_dir: outputs/grpo_pretrain_run
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  num_train_epochs: 3
+  max_steps: -1
+  learning_rate: 1e-6
+  lr_scheduler_type: linear
+  warmup_steps: 0
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_checkpointing: true
+  bf16: true
+  fp16: false
+  logging_steps: 10
+  save_strategy: steps
+  save_steps: 500
+  save_total_limit: 3
+  report_to: [tensorboard]
+  seed: 42
+  dry_run: false
+  dry_run_steps: 2
+grpo:
+  # "pretrain" selects the CER reward (src/rewards_pretrain.py).
+  stage: pretrain
+  # CER metric: "raw" (default) is case-sensitive and counts whitespace,
+  # matching the primary unnormalized CER reported by the eval; "normalized"
+  # casefolds and collapses whitespace on both sides.
+  cer_metric: raw
+  num_generations: 8
+  # Generation cap for the online rollout. Must exceed thinking + answer
+  # length; 512 truncates reasoning models. Keep finite (None is unsupported)
+  # and watch the reward/truncated metric to size it.
+  max_completion_length: 2048
+  temperature: 1.0
+  use_vllm: false
+  vllm_mode: colocate
+  beta: 0.0
+  loss_type: dapo
+  log_completions: false
+  # One weight per reward function; pretrain uses a single CER reward.
+  reward_weights: [1.0]

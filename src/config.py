@@ -101,14 +101,34 @@ class TrainingConfig:
 class GRPOConfig:
     """Configuration specific to GRPO (online RL)."""
 
+    # Which reward set the trainer uses:
+    #   "finetune" (default) -> [format_reward, accuracy_reward] (src.rewards)
+    #   "pretrain"           -> [cer_reward] (src.rewards_pretrain)
+    # Pretraining (e.g. learning Old Dutch) optimizes CER directly; finetuning
+    # refines an already-capable model with format + accuracy rewards.
+    stage: str = "finetune"
+    # Which CER metric the pretrain stage optimizes:
+    #   "raw" (default) -> case-sensitive CER, whitespace counts (matches the
+    #                      primary unnormalized CER reported by the eval)
+    #   "normalized"    -> casefolded, whitespace-collapsed CER
+    cer_metric: str = "raw"
     num_generations: int = 8
-    max_completion_length: int = 512
+    # Generation cap for the online rollout. Must comfortably exceed the
+    # thinking + answer length (see docs/usage.md); 512 truncates reasoning
+    # models. None is not supported by TRL (it is used in loss math and as
+    # max_new_tokens), so keep a finite value and monitor reward/truncated.
+    max_completion_length: int = 2048
     temperature: float = 1.0
     use_vllm: bool = False
     vllm_mode: str = "colocate"
     beta: float = 0.0
     loss_type: str = "dapo"
     log_completions: bool = False
+    # Per-reward-function weights, aligned with the order of the reward funcs
+    # selected by ``stage``. For "finetune" the order is (format, accuracy):
+    # format is a scaffold, accuracy carries the signal. For "pretrain" there
+    # is a single reward (CER), so use [1.0].
+    reward_weights: list[float] = field(default_factory=lambda: [0.2, 0.8])
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "GRPOConfig":

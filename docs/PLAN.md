@@ -70,7 +70,7 @@ Built on **TRL + PEFT (LoRA/QLoRA) + accelerate**, targeting **Qwen3.5-9B** on a
 
 ### Phase 3 — Evaluation (tools/ + src/)
 
- 1. **Use TRL/transformers native eval-during-training** (`eval_dataset` + `compute_metrics`) for in-loop metrics. **lm-eval-harness is external** (not native to TRL) → wrap it in `tools/evaluate.py` for post-training benchmark evals. Custom document-understanding eval (transcription accuracy) built on top of lm-eval-harness or a small custom harness.
+1. **Use TRL/transformers native eval-during-training** (`eval_dataset` + `compute_metrics`) for in-loop metrics. **lm-eval-harness is external** (not native to TRL) → wrap it in `eval/benchmarks.py` for post-training benchmark evals. Custom document-understanding evaluation (IoU, box-label accuracy, transcription CER, and repeated runs) uses `eval/documents.py`, with reusable scoring and orchestration in `eval/scoring.py` and `eval/runner.py`.
 
 ### Phase 4 — Multi-GPU scaling
 

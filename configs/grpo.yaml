@@ -42,10 +42,15 @@ training:
   dry_run_steps: 2
 grpo:
   num_generations: 8
-  max_completion_length: 512
+  # Generation cap for the online rollout. Must exceed thinking + answer
+  # length; 512 truncates reasoning models. Keep finite (None is unsupported)
+  # and watch the reward/truncated metric to size it.
+  max_completion_length: 2048
   temperature: 1.0
   use_vllm: false
   vllm_mode: colocate
   beta: 0.0
   loss_type: dapo
   log_completions: false
+  # Weights for [format_reward, accuracy_reward].
+  reward_weights: [0.2, 0.8]

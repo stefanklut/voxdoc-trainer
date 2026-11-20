@@ -65,13 +65,21 @@ def test_to_kto(tmp_path: Path) -> None:
 
 
 def test_to_grpo(tmp_path: Path) -> None:
-    """GRPO conversion should produce prompt-only records."""
+    """GRPO conversion should carry the ground truth for the reward."""
     image = _make_image(tmp_path)
-    rows = [{"image": image, "prompt": "Read this."}]
+    rows = [{"image": image, "prompt": "Read this.", "ground_truth": "A letter."}]
     dataset = to_grpo(rows)
     record = dataset[0]
     assert record["prompt"][0]["role"] == "user"
     assert len(record["images"]) == 1
+    assert record["ground_truth"] == "A letter."
+
+
+def test_to_grpo_requires_ground_truth(tmp_path: Path) -> None:
+    """GRPO rows without a ground truth should be rejected."""
+    image = _make_image(tmp_path)
+    with pytest.raises(ValueError, match="ground_truth"):
+        to_grpo([{"image": image, "prompt": "Read this."}])
 
 
 def test_to_sft_multi_turn(tmp_path: Path) -> None:
@@ -120,11 +128,12 @@ def test_to_kto_multi_turn(tmp_path: Path) -> None:
 def test_to_grpo_multi_turn(tmp_path: Path) -> None:
     """GRPO should use a multi-turn history as its generation prompt."""
     image = _make_image(tmp_path)
-    rows = [{"messages": _history(image)}]
+    rows = [{"messages": _history(image), "ground_truth": "A marginal note."}]
     dataset = to_grpo(rows)
     record = dataset[0]
     assert [m["role"] for m in record["prompt"]] == ["user", "assistant", "user"]
     assert len(record["images"]) == 1
+    assert record["ground_truth"] == "A marginal note."
 
 
 def test_legacy_single_turn_matches_messages(tmp_path: Path) -> None:

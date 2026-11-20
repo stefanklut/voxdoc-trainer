@@ -93,7 +93,10 @@ class Region(_Polygon):
     @property
     def region_type(self) -> Optional[str]:
         try:
-            re_match = re.match(r".*structure {.*type:(.*);.*}", self.attrib["custom"])
+            # The capture stops at the first ';' so a custom attribute holding
+            # several entries (e.g. 'structure {type:x;} readingOrder {index:1;}')
+            # still yields the bare type.
+            re_match = re.match(r".*structure {.*type:([^;]*);.*}", self.attrib["custom"])
         except KeyError:
             self.logger.warning(f"No region type defined for {self.attrib['id']}")
             return None
@@ -262,7 +265,10 @@ class PageXMLEditor(PageXML):
         Returns the type of element
         """
         try:
-            re_match = re.match(r".*structure {.*type:(.*);.*}", element.attrib["custom"])
+            # The capture stops at the first ';' so a custom attribute holding
+            # several entries (e.g. 'structure {type:x;} readingOrder {index:1;}')
+            # still yields the bare type.
+            re_match = re.match(r".*structure {.*type:([^;]*);.*}", element.attrib["custom"])
         except KeyError:
             self.logger.warning(f"No region type defined for {self.get_id(element)} at {self.filepath}")
             return None

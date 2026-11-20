@@ -113,13 +113,14 @@ def test_kto_training_startup(tmp_path) -> None:
 def test_grpo_training_startup(tmp_path) -> None:
     """A tiny GRPO run should complete a few steps and save a checkpoint."""
     rows = [
-        {"prompt": "Read this."},
+        {"prompt": "Read this.", "ground_truth": "The document is a letter."},
         {
             "messages": [
                 {"role": "user", "content": "Read this."},
                 {"role": "assistant", "content": "I found an uncertain section."},
                 {"role": "user", "content": "Explain that section."},
-            ]
+            ],
+            "ground_truth": "The section is a marginal note.",
         },
     ]
     dataset = to_grpo(rows)

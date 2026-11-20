@@ -12,6 +12,8 @@ from trl import GRPOConfig, GRPOTrainer
 
 from src.config import RunConfig, load_config
 from src.peft_utils import build_lora_config, build_quantization_config
+from src.rewards import accuracy_reward, format_reward
+from src.rewards_pretrain import cer_reward, cer_reward_normalized
 from utils.logging_utils import get_logger, setup_logger, write_run_metadata
 from utils.paths import run_output_dir
 
@@ -57,18 +59,60 @@ def build_grpo_config(config: RunConfig) -> GRPOConfig:
         beta=grpo.beta,
         loss_type=grpo.loss_type,
         log_completions=grpo.log_completions,
+        # Keep the `ground_truth` column so the reward functions can score
+        # completions against it (TRL drops non-model columns otherwise).
+        remove_unused_columns=False,
+        reward_weights=grpo.reward_weights,
         model_init_kwargs={"dtype": config.model.dtype},
         trust_remote_code=config.model.trust_remote_code,
     )
 
 
-def _default_reward_func(completions, **kwargs):
-    """Default reward function: reward non-empty completions.
+def select_reward_funcs(config: RunConfig) -> list:
+    """Select the GRPO reward functions for the configured stage.
 
-    This is a minimal placeholder so GRPO has a reward source. Replace with a
-    task-specific reward function derived from your feedback data.
+    Args:
+        config (RunConfig): The run configuration.
+
+    Returns:
+        list: The reward functions, in the order their weights appear in
+        ``grpo.reward_weights``.
+
+    Raises:
+        ValueError: If ``grpo.stage`` is unknown, ``grpo.cer_metric`` is
+        unknown, or ``grpo.reward_weights`` does not have one weight per
+        selected reward function.
     """
-    return [1.0 if completion else 0.0 for completion in completions]
+    stage = config.grpo.stage
+    if stage == "pretrain":
+        # Pretraining (e.g. learning Old Dutch): optimize CER directly.
+        # "raw" (default) is case-sensitive and counts whitespace; "normalized"
+        # casefolds and collapses whitespace on both sides.
+        if config.grpo.cer_metric == "normalized":
+            reward_funcs = [cer_reward_normalized]
+        elif config.grpo.cer_metric == "raw":
+            reward_funcs = [cer_reward]
+        else:
+            raise ValueError(
+                f"Unknown grpo.cer_metric {config.grpo.cer_metric!r}; expected 'raw' or 'normalized'."
+            )
+    elif stage == "finetune":
+        # Finetuning: format (well-formed answer) + accuracy (closeness to
+        # ground truth). Weights come from the config and are aligned to this
+        # order.
+        reward_funcs = [format_reward, accuracy_reward]
+    else:
+        raise ValueError(f"Unknown grpo.stage {stage!r}; expected 'finetune' or 'pretrain'.")
+
+    weights = config.grpo.reward_weights
+    if len(weights) != len(reward_funcs):
+        names = ", ".join(func.__name__ for func in reward_funcs)
+        raise ValueError(
+            f"grpo.reward_weights has {len(weights)} entries but stage {stage!r} "
+            f"selects {len(reward_funcs)} reward function(s) ({names}). "
+            "Provide one weight per reward function."
+        )
+    return reward_funcs
 
 
 def train(config: RunConfig) -> None:
@@ -87,7 +131,7 @@ def train(config: RunConfig) -> None:
         model=config.model.model_id,
         args=build_grpo_config(config),
         train_dataset=train_dataset,
-        reward_funcs=_default_reward_func,
+        reward_funcs=select_reward_funcs(config),
         peft_config=build_lora_config(config.model),
         quantization_config=build_quantization_config(config.model),
     )

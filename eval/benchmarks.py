@@ -3,6 +3,9 @@
 lm-eval-harness is external to TRL, so we wrap it here for post-training
 benchmark evals. For in-loop eval during training, use TRL's native
 `eval_dataset` + `compute_metrics` instead.
+
+This forwards harness arguments without configuring checkpoint loading or
+document metrics. Use :mod:`eval.documents` for repeated document evaluation.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ def evaluate(model: str, tasks: list[str], limit: int | None = None) -> None:
     """Run lm-eval-harness on a model for the given tasks.
 
     Args:
-        model (str): The model id or path.
+        model (str): The harness model/backend selector, passed unchanged.
         tasks (list[str]): The lm-eval task names.
         limit (int | None): Optional limit on the number of examples.
     """
@@ -27,7 +30,7 @@ def evaluate(model: str, tasks: list[str], limit: int | None = None) -> None:
 def main() -> None:
     """CLI entry point for evaluation."""
     parser = argparse.ArgumentParser(description="Evaluate a model with lm-eval-harness.")
-    parser.add_argument("--model", required=True, help="Model id or path.")
+    parser.add_argument("--model", required=True, help="lm-eval backend name (e.g. hf).")
     parser.add_argument("--tasks", nargs="+", required=True, help="lm-eval task names.")
     parser.add_argument("--limit", type=int, default=None, help="Optional example limit.")
     args = parser.parse_args()
