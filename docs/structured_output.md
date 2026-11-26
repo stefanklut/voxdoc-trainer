@@ -118,12 +118,22 @@ python tools/generate_doclang.py \
 python tools/generate_doclang.py \
     --base-url http://localhost:8000/v1 --model my-model \
     --image scan.png --out doc.dclg --mode json_schema
+
+# Batch mode: --image may be a directory; one <stem>.dclg is written per image.
+python tools/generate_doclang.py \
+    --base-url http://localhost:8000/v1 --model my-model \
+    --image scans/ --out data/doclang/
 ```
 
 Local image files are inlined as base64 data URIs; anything that is not an
 existing file is passed through as a URL. Omit `--out` to print the document on
 stdout. The document is validated by the client before it is written, so the
 output is always valid.
+
+In batch mode `--out` is required and is treated as an output directory. Images
+that fail are reported and skipped rather than aborting the run; the command
+exits non-zero if any image failed, so a partially converted corpus is easy to
+spot and re-run.
 
 ## Test suite
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from tools.data_creators.build_transcription_data import (
@@ -12,6 +14,7 @@ from tools.data_creators.build_transcription_data import (
     extract_transcription,
     find_image,
 )
+from utils.discovery import DiscoveryError
 
 
 def _make_image(path: Path) -> None:
@@ -132,9 +135,23 @@ def test_build_sft_record_attaches_image(tmp_path: Path) -> None:
     assert content[1]["type"] == "text"
 
 
+def _make_page_dir(tmp_path: Path) -> Path:
+    """Create and return a ``page`` directory under the corpus root.
+
+    Args:
+        tmp_path (Path): Corpus root.
+
+    Returns:
+        Path: The ``page`` directory, created if needed.
+    """
+    page_dir = tmp_path / "page"
+    page_dir.mkdir(exist_ok=True)
+    return page_dir
+
+
 def test_build_dataset_includes_valid_documents(tmp_path: Path) -> None:
     """build_dataset should include valid PAGE XML files that have a matching image."""
-    xml_path = tmp_path / "doc.xml"
+    xml_path = _make_page_dir(tmp_path) / "doc.xml"
     _make_page_xml(xml_path, [("l1", 1, "hello world")])
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -149,7 +166,7 @@ def test_build_dataset_includes_valid_documents(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_malformed_xml(tmp_path: Path) -> None:
     """build_dataset should skip files that are not well-formed XML."""
-    (tmp_path / "bad.xml").write_text("<PcGts><Page>", encoding="utf-8")
+    (_make_page_dir(tmp_path) / "bad.xml").write_text("<PcGts><Page>", encoding="utf-8")
     images_dir = tmp_path / "images"
     images_dir.mkdir()
 
@@ -160,7 +177,7 @@ def test_build_dataset_skips_malformed_xml(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_files_without_text(tmp_path: Path) -> None:
     """build_dataset should skip PAGE XML files that contain no text."""
-    xml_path = tmp_path / "doc.xml"
+    xml_path = _make_page_dir(tmp_path) / "doc.xml"
     _make_page_xml(xml_path, [])
     images_dir = tmp_path / "images"
     images_dir.mkdir()
@@ -173,7 +190,7 @@ def test_build_dataset_skips_files_without_text(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_files_without_image(tmp_path: Path) -> None:
     """build_dataset should skip valid PAGE XML files with no matching image."""
-    xml_path = tmp_path / "doc.xml"
+    xml_path = _make_page_dir(tmp_path) / "doc.xml"
     _make_page_xml(xml_path, [("l1", 1, "hello world")])
     images_dir = tmp_path / "images"
     images_dir.mkdir()  # empty: no doc.png
@@ -185,10 +202,151 @@ def test_build_dataset_skips_files_without_image(tmp_path: Path) -> None:
 
 def test_build_dataset_ignores_non_xml_files(tmp_path: Path) -> None:
     """build_dataset should only consider .xml files."""
-    (tmp_path / "notes.txt").write_text("not xml", encoding="utf-8")
+    page_dir = _make_page_dir(tmp_path)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "hello world")])
+    (page_dir / "notes.txt").write_text("not xml", encoding="utf-8")
     images_dir = tmp_path / "images"
     images_dir.mkdir()
+    _make_image(images_dir / "doc.png")
 
     records, skipped = build_dataset(tmp_path, images_dir)
-    assert records == []
+    assert records != []
     assert skipped == 0
+
+
+def test_build_dataset_discovers_nested_page_dirs(tmp_path: Path) -> None:
+    """build_dataset should find PAGE XML nested below the corpus root."""
+    page_dir = tmp_path / "corpus" / "document_001" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "nested")])
+    _make_image(page_dir.parent / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", None)
+    assert skipped == 0
+    assert len(records) == 1
+    assert records[0]["completion"][0]["content"][0]["text"] == "nested"
+
+
+def test_build_dataset_finds_images_without_images_flag(tmp_path: Path) -> None:
+    """Without --images, the image one level above the page directory is used."""
+    page_dir = tmp_path / "document" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "sibling")])
+    _make_image(page_dir.parent / "doc.tif")
+
+    records, skipped = build_dataset(tmp_path, None)
+    assert skipped == 0
+    assert len(records) == 1
+
+
+def test_build_dataset_raises_when_no_page_dir_exists(tmp_path: Path) -> None:
+    """A corpus without any page directory is reported rather than silently empty."""
+    (tmp_path / "flat.xml").write_text("<PcGts><Page/></PcGts>", encoding="utf-8")
+    with pytest.raises(DiscoveryError):
+        build_dataset(tmp_path, None)
+
+
+def test_build_sft_record_embeds_image_by_default(tmp_path: Path) -> None:
+    """Without an explicit mode the record carries a decoded image, as before."""
+    _make_image(tmp_path / "doc.png")
+    record = build_sft_record("hello", tmp_path / "doc.png")
+    embedded = record["images"][0]
+    assert isinstance(embedded, Image.Image)
+    assert embedded.size == (8, 8)
+
+
+def test_build_sft_record_reference_mode_stores_path(tmp_path: Path) -> None:
+    """Reference mode stores the image path relative to the corpus root."""
+    image = tmp_path / "corpus" / "doc.png"
+    image.parent.mkdir(parents=True)
+    _make_image(image)
+    record = build_sft_record("hello", image, "reference", [tmp_path / "corpus"])
+    assert record["images"] == ["doc.png"]
+
+
+def test_build_dataset_reference_mode_stores_relative_paths(tmp_path: Path) -> None:
+    """build_dataset in reference mode yields string image entries for every record."""
+    page_dir = tmp_path / "corpus" / "document" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "lazy")])
+    _make_image(page_dir.parent / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", None, image_mode="reference")
+    assert skipped == 0
+    assert [record["images"] for record in records] == [["document/doc.png"]]
+
+
+def test_build_dataset_reference_mode_with_images_flag(tmp_path: Path) -> None:
+    """Explicit image directories are recorded as the root for stored paths."""
+    page_dir = tmp_path / "corpus" / "document" / "page"
+    page_dir.mkdir(parents=True)
+    image_dir = tmp_path / "scans"
+    image_dir.mkdir()
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "lazy")])
+    _make_image(image_dir / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", [image_dir], image_mode="reference")
+    assert skipped == 0
+    assert records[0]["images"] == ["doc.png"]
+
+
+def test_build_dataset_embed_mode_unchanged(tmp_path: Path) -> None:
+    """The default mode still embeds decoded images, so existing datasets are unaffected."""
+    page_dir = tmp_path / "corpus" / "document" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "embedded")])
+    _make_image(page_dir.parent / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", None)
+    assert skipped == 0
+    assert isinstance(records[0]["images"][0], Image.Image)
+
+
+def test_main_writes_manifest_for_reference_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI records the image mode and corpus root next to the saved dataset."""
+    import json
+
+    from tools.data_creators import build_transcription_data
+
+    page_dir = tmp_path / "corpus" / "document" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "lazy")])
+    _make_image(page_dir.parent / "doc.png")
+    output = tmp_path / "dataset"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_transcription_data.py",
+            "--input",
+            str(tmp_path / "corpus"),
+            "--output",
+            str(output),
+            "--image-mode",
+            "reference",
+        ],
+    )
+
+    build_transcription_data.main()
+
+    manifest = json.loads((output / "image_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["image_mode"] == "reference"
+    assert manifest["roots"] == [str((tmp_path / "corpus").resolve())]
+
+
+def test_main_omits_manifest_in_embed_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default CLI mode saves exactly what it saved before, with no sidecar."""
+    from tools.data_creators import build_transcription_data
+
+    page_dir = tmp_path / "corpus" / "document" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", 1, "embedded")])
+    _make_image(page_dir.parent / "doc.png")
+    output = tmp_path / "dataset"
+    monkeypatch.setattr(
+        sys, "argv", ["build_transcription_data.py", "--input", str(tmp_path / "corpus"), "--output", str(output)]
+    )
+
+    build_transcription_data.main()
+
+    assert not (output / "image_manifest.json").exists()

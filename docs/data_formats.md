@@ -187,7 +187,11 @@ explicit `data.split`.
 Chat history and image-placeholder order are preserved. Arrow's null-padded
 content-block fields are normalized only at the data-loading boundary. Source
 image pixels are encoded as PNG; single-frame PNG-compatible PIL images are
-required. Numeric transcriptions remain text. Existing HF prompts are used
+required. An `images` entry may also be a path string, in which case the file
+is read from disk (see
+[Storing images: embedded vs. referenced](#storing-images-embedded-vs-referenced));
+set `data.image_root` to point at a corpus that has moved since the dataset was
+built. Numeric transcriptions remain text. Existing HF prompts are used
 unchanged and cannot be automatically rewritten into grid/pixel variants.
 
 Current data creators do not retain native box metadata or semantic labels.
@@ -230,42 +234,164 @@ becomes:
 Both forms are accepted by the converter; `messages` is preferred for new data
 because it supports follow-up turns.
 
+## Corpus layout and autodiscovery
+
+Every data creator takes one or more **corpus roots** via `--input` and
+discovers documents automatically, so a corpus laid out per document works
+without pointing at each leaf directory:
+
+```
+corpus/
+├── document_001/
+│   ├── document_001.png          # source image
+│   └── page/
+│       └── document_001.xml      # PAGE XML ground truth
+└── document_002/
+    ├── document_002.jpg
+    └── page/
+        └── document_002.xml
+```
+
+- **PAGE XML** (`.xml`) is discovered only inside directories named `page`, at
+  any depth below the root. XML that lives elsewhere (ALTO files, sidecar
+  XSLT, `metadata.xml`, …) is deliberately ignored. If no `page` directory
+  holds any `.xml`, the tool stops with an actionable error rather than
+  silently producing an empty dataset.
+- **DocLang** (`.dclg`) is discovered recursively at any depth — the extension
+  is unambiguous, so no directory convention is required.
+- `--input` accepts multiple roots (`--input corpus_a/ corpus_b/`), which are
+  merged.
+
+`--images` is **optional** and also accepts multiple roots. When it is omitted
+(or when a root has no match), the source image for a document is located from
+the corpus layout itself, trying these in order and taking the first hit:
+
+1. `<stem>.<ext>` in each explicit `--images` root.
+2. The PAGE XML `<Page imageFilename="...">` attribute, resolved against the
+   document's own directory, the directory above a `page` directory, and each
+   `--images` root (handles both a bare `document.png` and a relative
+   `images/document.png`).
+3. `<stem>.<ext>` in the document's own directory and, when the document sits
+   in a `page` directory, in the directory above it.
+
+Images are matched by **filename stem**, not by folder structure alone, in any
+format Pillow can open.
+
+## Storing images: embedded vs. referenced
+
+By default every creator **embeds** decoded images into the dataset: the
+pixels are re-encoded and copied into the dataset's Arrow files, so a dataset
+of 1000 300-dpi scans is roughly 4.5 GB and carries its images with it. That
+is what you want for a dataset you publish, archive, or hand to another
+machine.
+
+`--image-mode reference` stores the **path** of each source image instead and
+writes an `image_manifest.json` next to the dataset:
+
+```bash
+python tools/data_creators/build_transcription_data.py \
+  --input corpus/ --output data/transcription --image-mode reference
+```
+
+The same flag exists on `build_doclang_data.py`, `build_bbox_data.py`,
+`build_region_data.py`, and `convert_data.py`. The dataset then holds only
+text: the same 1000-page corpus is a few megabytes, builds in seconds, and
+rebuilding after changing prompts or targets costs nothing. The manifest looks
+like this:
+
+```json
+{"version": 1, "image_mode": "reference", "roots": ["/data/corpus"]}
+```
+
+Paths are stored relative to the first root that contains them, so a corpus
+that moves as a whole keeps working. During training the images are decoded
+lazily, one batch at a time, by a collator wrapper installed by the training
+entry points; nothing is decoded while the dataset is loaded or prepared.
+
+**Trade-offs:**
+
+| | `embed` (default) | `reference` |
+| --- | --- | --- |
+| Dataset size | ~4.5 GB per 1000 pages | a few MB |
+| Rebuild after prompt changes | rewrites every image | seconds |
+| Portable / shareable | yes | no — needs the corpus |
+| Training speed | decode once, cached | decoded per batch |
+
+**Finding a moved corpus.** Resolution tries, in order: the config's
+`data.image_root`, the roots recorded in `image_manifest.json`, the dataset's
+own directory, and the current working directory. If nothing matches, training
+stops with the missing path and the directories it searched. Set `image_root`
+when the corpus lives somewhere other than where it was when the dataset was
+built:
+
+```yaml
+data:
+  train_path: data/transcription   # reference-mode dataset
+  image_root: /data/corpus         # where the images live now
+```
+
+`image_root` applies to the training datasets; evaluation datasets use the
+matching `image_root` field on the data source (see
+[Evaluation manifests](#evaluation-manifests)).
+
+Reference-mode datasets are ordinary HF datasets and work with
+`--dataset-mode auto` in `eval/runner.py`: rows whose `images` column holds
+strings are read from disk, so the evaluation fingerprint (sha256, raster
+size, mime type) is identical to the embedded equivalent.
+
+Two limitations are worth knowing. Images are **not** resized or recompressed
+by reference mode — the original file is decoded as-is, exactly as the
+embedded mode's `Image.convert("RGB")` would. And because the pixels live
+outside the dataset, deleting or editing the corpus silently changes what the
+dataset trains on; treat the corpus as part of the dataset.
 ## DocLang (historical document transcription)
 
 DocLang (<https://doclang.ai/>) is an AI-native XML document format designed for LLMs
 to consume directly. If the model does not support it natively, we teach it to by
 giving it many examples of existing OCR already in DocLang format.
 
-Build SFT training data from a directory of existing DocLang documents (`.dclg`
-files) and their source images (in any format Pillow can open — png, jpg, webp,
-tiff, etc.). Each document is validated with the official `doclang` package before
+Build SFT training data from existing DocLang documents (`.dclg` files) and
+their source images (in any format Pillow can open — png, jpg, webp, tiff,
+etc.). Documents are discovered recursively under `--input`; `--images` is
+optional (see [Corpus layout and autodiscovery](#corpus-layout-and-autodiscovery)).
+Each document is validated with the official `doclang` package before
 it is added; documents that fail validation or have no matching source image are
 skipped. The model sees a document image and must produce the DocLang
 representation as its completion, so it learns the format itself:
 
 ```bash
-python tools/data_creators/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+# Images found from the corpus layout:
+python tools/data_creators/build_doclang_data.py --input path/to/corpus/ --output data/transcription
+
+# Or with explicit image directories:
+python tools/data_creators/build_doclang_data.py --input path/to/corpus/ --images path/to/images/ --output data/transcription
 ```
 
 ## PAGE XML (plain unicode transcription)
 
 Build SFT training data that teaches the model to transcribe a document image to
-plain unicode. The tool reads a directory of PAGE XML ground-truth files (`.xml`)
-and their source images, extracts each document's transcription (lines ordered by
+plain unicode. The tool reads PAGE XML ground-truth files (`.xml`) discovered in
+`page` directories under `--input`, together with their source images, extracts
+each document's transcription (lines ordered by
 their reading order when available), and emits one SFT example per document: the
 model sees the image and must produce the transcription as its completion. Files
 that cannot be parsed, that contain no text, or that have no matching image are
 skipped:
 
 ```bash
-python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
+# Images found from the corpus layout (imageFilename, or the dir above page/):
+python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --output data/unicode_transcription
+
+# Or with explicit image directories:
+python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --images path/to/images/ --output data/unicode_transcription
 ```
 
 ## BBox <-> Text (grounding)
 
 Build SFT training data that teaches the model to ground text in bounding boxes
-(and vice versa). The tool reads a directory of PAGE XML (`.xml`) and DocLang
-(`.dclg`) files and their source images: PAGE XML `TextLine` polygons are fit
+(and vice versa). The tool reads PAGE XML (`.xml`) discovered in `page`
+directories under `--input`, plus DocLang (`.dclg`) files found at any depth,
+and their source images: PAGE XML `TextLine` polygons are fit
 to bounding boxes, and DocLang `<text>` elements use their four `<location>`
 values (interpreted as `x_min, y_min, x_max, y_max`, per the DocLang spec).
 
@@ -300,13 +426,17 @@ reproducible). Files that cannot be parsed, that contain no usable pairs, or
 that have no matching image are skipped:
 
 ```bash
-python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen
+python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --output data/bbox --mode text_to_bbox --bbox-format qwen
+
+# Or with explicit image directories:
+python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen
 ```
 
 ## Region detection and labeling
 
 Build SFT training data that teaches the model to detect and label document
-regions. The tool reads a directory of PAGE XML (`.xml`) files and their
+regions. The tool reads PAGE XML (`.xml`) files discovered in `page`
+directories under `--input`, together with their
 source images: every element whose tag ends in `Region` (at any nesting depth)
 is fit to an axis-aligned bounding box.
 
@@ -333,14 +463,25 @@ makes the selection reproducible). Files that cannot be parsed, that contain
 no regions, or that have no matching image are skipped:
 
 ```bash
-python tools/data_creators/build_region_data.py --input path/to/pagexml/ --images path/to/images/ --output data/regions --mode detect_all --bbox-format qwen
+python tools/data_creators/build_region_data.py --input path/to/corpus/ --output data/regions --mode detect_all --bbox-format qwen
+
+# Or with explicit image directories:
+python tools/data_creators/build_region_data.py --input path/to/corpus/ --images path/to/images/ --output data/regions --mode detect_all --bbox-format qwen
 ```
 
 ## Converting JSONL to HF datasets
+
+`--input` accepts one or more JSONL files and/or directories; each directory
+contributes the `.jsonl` files directly inside it, in sorted order. Relative
+`image` paths in the rows are resolved against the directory holding the JSONL
+file, so keeping the JSONL at the root of the corpus it describes is enough.
 
 ```bash
 python tools/convert_data.py --input data/train.jsonl --output data/train_sft --method sft
 python tools/convert_data.py --input data/train.jsonl --output data/train_dpo --method dpo
 python tools/convert_data.py --input data/train.jsonl --output data/train_kto --method kto
 python tools/convert_data.py --input data/train.jsonl --output data/train_grpo --method grpo
+
+# A whole directory of raw JSONL files at once:
+python tools/convert_data.py --input data/raw/ --output data/train_sft --method sft
 ```

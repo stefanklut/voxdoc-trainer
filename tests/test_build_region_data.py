@@ -29,6 +29,7 @@ from tools.data_creators.build_region_data import (
     polygon_to_bbox,
     to_qwen_bbox,
 )
+from utils.discovery import DiscoveryError
 
 # The coordinate-space sentences appended to prompts (see _coord_space_note).
 QWEN_NOTE = " All bounding-box coordinates are integers normalized to the 0-1000 range."
@@ -127,13 +128,28 @@ def _prompt_text(record: dict) -> str:
     return record["prompt"][0]["content"][1]["text"]
 
 
+def _page_dir(tmp_path: Path) -> Path:
+    """Return (creating if needed) the ``page`` directory of a corpus root.
+
+    Args:
+        tmp_path (Path): Corpus root.
+
+    Returns:
+        Path: The ``page`` directory.
+    """
+    page_dir = tmp_path / "page"
+    page_dir.mkdir(exist_ok=True)
+    return page_dir
+
+
 def _make_pool(tmp_path: Path, n_files: int) -> Path:
     """Create ``n_files`` mixed PAGE XML pages plus matching images."""
     images = tmp_path / "images"
     images.mkdir()
+    page_dir = _page_dir(tmp_path)
     for i in range(n_files):
         stem = f"doc{i}"
-        _make_mixed_page(tmp_path / f"{stem}.xml")
+        _make_mixed_page(page_dir / f"{stem}.xml")
         _make_image(images / f"{stem}.png")
     return images
 
@@ -599,8 +615,9 @@ def test_build_dataset_find_region(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_file_without_image(tmp_path: Path) -> None:
     """A file with regions but no matching image is skipped."""
-    _make_mixed_page(tmp_path / "a.xml")
-    _make_mixed_page(tmp_path / "b.xml")
+    page_dir = _page_dir(tmp_path)
+    _make_mixed_page(page_dir / "a.xml")
+    _make_mixed_page(page_dir / "b.xml")
     images = tmp_path / "images"
     images.mkdir()
     _make_image(images / "b.png")
@@ -612,8 +629,9 @@ def test_build_dataset_skips_file_without_image(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_file_without_regions(tmp_path: Path) -> None:
     """A file with no regions is skipped."""
-    _make_page_xml_regions(tmp_path / "a.xml", [])
-    _make_mixed_page(tmp_path / "b.xml")
+    page_dir = _page_dir(tmp_path)
+    _make_page_xml_regions(page_dir / "a.xml", [])
+    _make_mixed_page(page_dir / "b.xml")
     images = tmp_path / "images"
     images.mkdir()
     _make_image(images / "a.png")
@@ -626,8 +644,9 @@ def test_build_dataset_skips_file_without_regions(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_malformed_xml(tmp_path: Path) -> None:
     """A malformed .xml file is skipped, not fatal."""
-    (tmp_path / "bad.xml").write_text("<PcGts><Page></PcGts>", encoding="utf-8")
-    _make_mixed_page(tmp_path / "good.xml")
+    page_dir = _page_dir(tmp_path)
+    (page_dir / "bad.xml").write_text("<PcGts><Page></PcGts>", encoding="utf-8")
+    _make_mixed_page(page_dir / "good.xml")
     images = tmp_path / "images"
     images.mkdir()
     _make_image(images / "bad.png")
@@ -640,18 +659,55 @@ def test_build_dataset_skips_malformed_xml(tmp_path: Path) -> None:
 
 def test_build_dataset_ignores_other_extensions(tmp_path: Path) -> None:
     """Files that are not .xml are ignored (not counted as skipped)."""
-    (tmp_path / "notes.txt").write_text("not a doc", encoding="utf-8")
+    page_dir = _page_dir(tmp_path)
+    _make_mixed_page(page_dir / "doc.xml")
+    (page_dir / "notes.txt").write_text("not a doc", encoding="utf-8")
     images = tmp_path / "images"
     images.mkdir()
+    _make_image(images / "doc.png")
 
     records, skipped = build_dataset(tmp_path, images, MODE_DETECT_ALL, "qwen")
-    assert records == []
+    assert len(records) == 1
     assert skipped == 0
+
+
+def test_build_dataset_ignores_xml_outside_page_dirs(tmp_path: Path) -> None:
+    """.xml files outside a 'page' directory are not discovered."""
+    page_dir = _page_dir(tmp_path)
+    _make_mixed_page(page_dir / "doc.xml")
+    _make_mixed_page(tmp_path / "stray.xml")
+    images = tmp_path / "images"
+    images.mkdir()
+    _make_image(images / "doc.png")
+    _make_image(images / "stray.png")
+
+    records, skipped = build_dataset(tmp_path, images, MODE_DETECT_ALL, "qwen")
+    assert len(records) == 1
+    assert skipped == 0
+
+
+def test_build_dataset_discovers_nested_page_dirs(tmp_path: Path) -> None:
+    """PAGE XML nested below the corpus root is discovered."""
+    page_dir = tmp_path / "corpus" / "document_001" / "page"
+    page_dir.mkdir(parents=True)
+    _make_mixed_page(page_dir / "doc.xml")
+    _make_image(page_dir.parent / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", None, MODE_DETECT_ALL, "qwen")
+    assert skipped == 0
+    assert len(records) == 1
+
+
+def test_build_dataset_raises_when_no_page_dir_exists(tmp_path: Path) -> None:
+    """A corpus without any page directory is reported rather than silently empty."""
+    (tmp_path / "flat.xml").write_text("<PcGts><Page/></PcGts>", encoding="utf-8")
+    with pytest.raises(DiscoveryError):
+        build_dataset(tmp_path, None, MODE_DETECT_ALL, "qwen")
 
 
 def test_build_dataset_falls_back_to_image_size(tmp_path: Path) -> None:
     """A page without imageWidth/imageHeight normalizes by the actual image size."""
-    path = tmp_path / "doc.xml"
+    path = _page_dir(tmp_path) / "doc.xml"
     _make_page_xml_regions(
         path,
         [("TextRegion", "0,0 4,0 4,4 0,4", None, [])],
@@ -704,7 +760,7 @@ def test_build_dataset_sampling_subset_of_global_pool(tmp_path: Path) -> None:
     completions = [_completion_text(record) for record in records]
     assert len(completions) == 5
     # The pool is the union of every page's candidates (pages are identical here).
-    regions = extract_regions(tmp_path / "doc0.xml")
+    regions = extract_regions(_page_dir(tmp_path) / "doc0.xml")
     pool = {completion for _, completion in build_find_region_candidates(regions, "qwen", (100, 100))}
     assert set(completions) <= pool
 
@@ -723,3 +779,49 @@ def test_build_dataset_unknown_mode_raises(tmp_path: Path) -> None:
     images.mkdir()
     with pytest.raises(ValueError, match="Unknown mode"):
         build_dataset(tmp_path, images, "unknown_mode", "qwen")
+
+
+def test_make_record_reference_mode_stores_path(tmp_path: Path) -> None:
+    """Reference mode stores the image path relative to the corpus root."""
+    image = tmp_path / "images" / "doc.png"
+    image.parent.mkdir()
+    _make_image(image)
+    record = _make_record("Find the regions.", "[[0,0,100,100]]", image, "reference", [tmp_path / "images"])
+    assert record["images"] == ["doc.png"]
+
+
+def test_make_record_embed_mode_unchanged(tmp_path: Path) -> None:
+    """The default mode still embeds a decoded image."""
+    image = tmp_path / "images" / "doc.png"
+    image.parent.mkdir()
+    _make_image(image)
+    record = _make_record("Find the regions.", "[[0,0,100,100]]", image)
+    assert isinstance(record["images"][0], Image.Image)
+
+
+def test_build_dataset_reference_mode_stores_relative_paths(tmp_path: Path) -> None:
+    """Reference mode yields string image entries for every record."""
+    images = _make_pool(tmp_path, 2)
+    records, skipped = build_dataset(tmp_path, images, MODE_DETECT_ALL, "qwen", image_mode="reference")
+    assert skipped == 0
+    assert records
+    assert [record["images"] for record in records] == [["doc0.png"], ["doc1.png"]]
+
+
+def test_build_dataset_embed_mode_unchanged(tmp_path: Path) -> None:
+    """The default mode still embeds decoded images, so existing datasets are unaffected."""
+    images = _make_pool(tmp_path, 1)
+    records, skipped = build_dataset(tmp_path, images, MODE_DETECT_ALL, "qwen")
+    assert skipped == 0
+    assert all(isinstance(record["images"][0], Image.Image) for record in records)
+
+
+def test_build_dataset_reference_mode_sampling_unchanged(tmp_path: Path) -> None:
+    """Sampling is independent of the image mode, so both modes select the same rows."""
+    images = _make_pool(tmp_path, 3)
+    embedded, _ = build_dataset(tmp_path, images, MODE_FIND_REGION, "qwen", max_lines=5, seed=42)
+    referenced, _ = build_dataset(
+        tmp_path, images, MODE_FIND_REGION, "qwen", max_lines=5, seed=42, image_mode="reference"
+    )
+    assert [_prompt_text(r) for r in embedded] == [_prompt_text(r) for r in referenced]
+    assert all(isinstance(r["images"][0], str) for r in referenced)

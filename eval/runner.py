@@ -38,6 +38,7 @@ from eval.scoring import (
     summarize,
     validate_variant,
 )
+from utils.image_loading import read_image_manifest, resolve_image_path
 from utils.logging_utils import get_logger
 
 LOGGER = get_logger()
@@ -57,6 +58,8 @@ class DataSource(EvaluationModel):
     label_vocabulary: Optional[list[StrictStr]] = None
     limit: Optional[StrictInt] = Field(default=None, gt=0)
     sampling_seed: Optional[StrictInt] = None
+    image_root: Optional[StrictStr] = None
+    """Directory to remap stored image paths onto, for HF datasets built with --image-mode reference."""
 
     @model_validator(mode="after")
     def validate_source(self) -> DataSource:
@@ -200,7 +203,12 @@ def _pil_data_uri(image: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _hf_sample(row: dict[str, Any], index: int, source: DataSource) -> Sample:
+def _hf_sample(
+    row: dict[str, Any],
+    index: int,
+    source: DataSource,
+    image_roots: list[Path] | None = None,
+) -> Sample:
     if "ground_truth" not in row and "completion" not in row:
         raise ValueError("HF rows require ground_truth or completion")
     reference = _completion_text(row["ground_truth"] if "ground_truth" in row else row["completion"])
@@ -208,9 +216,15 @@ def _hf_sample(row: dict[str, Any], index: int, source: DataSource) -> Sample:
         raise ValueError("conflicting ground_truth and completion columns")
     images = []
     for image in row.get("images") or []:
-        if not isinstance(image, Image.Image):
-            raise ValueError("HF images must be decoded PIL images")
-        images.append(_pil_data_uri(image))
+        if isinstance(image, Image.Image):
+            images.append(_pil_data_uri(image))
+        elif isinstance(image, str):
+            # Reference-mode datasets store the source image path; _image_payload
+            # reads and fingerprints the file, so the bytes are used as-is.
+            resolved = resolve_image_path(image, image_roots, source.image_root)
+            images.append(str(resolved))
+        else:
+            raise ValueError("HF images must be decoded PIL images or paths to them")
     messages = row.get("prompt")
     if isinstance(messages, str):
         content = [{"type": "image"} for _ in images] + [{"type": "text", "text": messages}]
@@ -328,7 +342,9 @@ def load_samples(source: DataSource) -> list[Sample]:
         if source.sampling_seed is not None:
             random.Random(source.sampling_seed).shuffle(indices)
         indices = indices[: source.limit]
-        samples = [_hf_sample(dataset[index], index, source) for index in indices]
+        manifest = read_image_manifest(path)
+        image_roots = [Path(root) for root in manifest.get("roots", [])] if manifest else []
+        samples = [_hf_sample(dataset[index], index, source, image_roots) for index in indices]
     if source.format == "manifest":
         if source.sampling_seed is not None:
             random.Random(source.sampling_seed).shuffle(samples)

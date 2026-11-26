@@ -26,6 +26,7 @@ from eval.runner import (
     score_prediction_file,
     score_saved_run,
 )
+from utils.image_loading import ImageNotFoundError
 from utils.metrics import character_error_rate
 
 
@@ -401,6 +402,100 @@ def test_hf_labeled_gt_is_explicit(tmp_path: Path) -> None:
     )
     sample = load_samples(source)[0]
     assert sample.boxes is not None and sample.boxes[0].label == "text"
+
+
+def hf_reference_dataset(
+    tmp_path: Path,
+    *,
+    reference: str = "123",
+    task: str = "transcription",
+    image_root: str | None = None,
+    **options: Any,
+) -> DataSource:
+    """Save a reference-mode HF dataset (image paths, no bytes) and its source.
+
+    Args:
+        tmp_path (Path): Base directory.
+        reference (str): The ground-truth completion text.
+        task (str): The explicit HF task.
+        image_root (str | None): Remapping root to record on the data source.
+        **options (Any): Extra DataSource fields.
+
+    Returns:
+        DataSource: The configured source.
+    """
+    corpus = tmp_path / "corpus"
+    (corpus / "document").mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (8, 8), color="white").save(corpus / "document" / "doc.png")
+    row = {
+        "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Read this document."}]}],
+        "completion": [{"role": "assistant", "content": [{"type": "text", "text": reference}]}],
+        "images": ["document/doc.png"],
+    }
+    path = tmp_path / "hf"
+    Dataset.from_list([row]).save_to_disk(str(path))
+    (path / "image_manifest.json").write_text(
+        json.dumps({"version": 1, "image_mode": "reference", "roots": [str(corpus)]}), encoding="utf-8"
+    )
+    source = {"path": str(path), "format": "hf", "task": task, **options}
+    if image_root is not None:
+        source["image_root"] = image_root
+    return DataSource.model_validate(source)
+
+
+def test_hf_reference_dataset_reads_image_from_disk(tmp_path: Path) -> None:
+    """A dataset storing paths loads the original file instead of rejecting the row."""
+    source = hf_reference_dataset(tmp_path)
+    sample = load_samples(source)[0]
+    assert sample.images == [str((tmp_path / "corpus" / "document" / "doc.png").resolve())]
+
+
+def test_hf_reference_and_embedded_fingerprints_match(tmp_path: Path) -> None:
+    """The same page yields the same fingerprint whether bytes are inlined or referenced."""
+    embedded = hf_dataset(tmp_path, images=1)
+    referenced = hf_reference_dataset(tmp_path / "ref")
+    embedded_run, referenced_run = tmp_path / "embedded_run", tmp_path / "referenced_run"
+    for source, output_dir in ((embedded, embedded_run), (referenced, referenced_run)):
+        config = ExperimentConfig.model_validate(
+            {"data": source, "model": "model", "output_dir": str(output_dir), "variants": [{"name": "default"}]}
+        )
+        run_experiment(config, FakeEndpoint())
+    embedded_meta = json.loads((embedded_run / "metadata.json").read_text())
+    referenced_meta = json.loads((referenced_run / "metadata.json").read_text())
+    assert embedded_meta["images"]["0"] == referenced_meta["images"]["0"]
+
+
+def test_hf_reference_image_root_remaps_moved_corpus(tmp_path: Path) -> None:
+    """A corpus that moved is found through the configured image root."""
+    source = hf_reference_dataset(tmp_path, image_root=str(tmp_path / "moved"))
+    corpus = tmp_path / "corpus"
+    (tmp_path / "moved" / "document").mkdir(parents=True)
+    Image.new("RGB", (8, 8), color="black").save(tmp_path / "moved" / "document" / "doc.png")
+    corpus.joinpath("document", "doc.png").unlink()
+    sample = load_samples(source)[0]
+    assert sample.images == [str((tmp_path / "moved" / "document" / "doc.png").resolve())]
+
+
+def test_hf_missing_reference_image_reports_searched_dirs(tmp_path: Path) -> None:
+    """A stored path with no file behind it names the path and the roots tried."""
+    source = hf_reference_dataset(tmp_path)
+    (tmp_path / "corpus" / "document" / "doc.png").unlink()
+    with pytest.raises(ImageNotFoundError, match="document/doc.png"):
+        load_samples(source)
+
+
+def test_hf_unsupported_image_value_still_rejected(tmp_path: Path) -> None:
+    """A non-string, non-image entry is still an error rather than a silent skip."""
+    row = {
+        "prompt": [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "Read this document."}]}],
+        "completion": [{"role": "assistant", "content": [{"type": "text", "text": "123"}]}],
+        "images": [1234],
+    }
+    path = tmp_path / "hf"
+    Dataset.from_list([row]).save_to_disk(str(path))
+    source = DataSource.model_validate({"path": str(path), "format": "hf", "task": "transcription"})
+    with pytest.raises(ValueError, match="decoded PIL images or paths"):
+        load_samples(source)
 
 
 def test_manifest_images_are_hashed_and_raster_size_is_distinct(tmp_path: Path, tiny_image: Path) -> None:

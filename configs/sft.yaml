@@ -20,6 +20,9 @@ data:
   dataset_num_proc: 4
   shuffle: true
   pad_to_multiple_of: null
+  # Directory to remap image paths onto, for datasets built with --image-mode reference.
+  # Leave null to use the corpus roots recorded in the dataset's image_manifest.json.
+  image_root: null
 training:
   output_dir: outputs/sft_run
   per_device_train_batch_size: 2

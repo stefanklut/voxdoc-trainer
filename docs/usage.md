@@ -17,6 +17,7 @@ data:
   train_path: data/train_sft
   eval_path: null
   max_length: null
+  image_root: null   # corpus root for --image-mode reference datasets
 training:
   output_dir: outputs/sft_run
   per_device_train_batch_size: 2
@@ -157,30 +158,40 @@ Reasoning-model considerations:
 
 To teach the model to emit DocLang natively, build SFT examples from existing
 OCR already in DocLang format (see [docs/data_formats.md](data_formats.md)).
-Each document needs a matching source image (any format Pillow can open — png,
-jpg, webp, tiff, etc.); documents without one are skipped:
+Documents are discovered recursively under `--input`. Each document needs a
+matching source image (any format Pillow can open — png,
+jpg, webp, tiff, etc.); documents without one are skipped. `--images` is
+optional: without it, images are located from the corpus layout (see
+[Corpus layout and autodiscovery](data_formats.md#corpus-layout-and-autodiscovery)):
 
 ```bash
-python tools/data_creators/build_doclang_data.py --input path/to/doclang/ --images path/to/images/ --output data/transcription
+python tools/data_creators/build_doclang_data.py --input path/to/corpus/ --output data/transcription
+python tools/data_creators/build_doclang_data.py --input path/to/corpus/ --images path/to/images/ --output data/transcription
 ```
 
 ## Build transcription training data
 
 To teach the model to transcribe a document image to plain unicode, build SFT
-examples from PAGE XML ground-truth files and their source images. The
+examples from PAGE XML ground-truth files and their source images. PAGE XML is
+discovered in `page` directories at any depth below `--input`, which accepts
+multiple roots. The
 transcription is extracted from the PAGE XML (lines ordered by reading order when
 available); files that cannot be parsed, that contain no text, or that have no
 matching image are skipped:
 
 ```bash
-python tools/data_creators/build_transcription_data.py --input path/to/pagexml/ --images path/to/images/ --output data/unicode_transcription
+python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --output data/unicode_transcription
+python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --images path/to/images/ --output data/unicode_transcription
 ```
 
 ## Build bbox grounding training data
 
 To teach the model to ground text in bounding boxes — or to predict a bounding
 box for a line of text — build SFT examples from PAGE XML and/or DocLang files
-and their source images. Choose the task with `--mode` and the bbox
+and their source images. PAGE XML is discovered in `page` directories at any
+depth below `--input`; DocLang is discovered at any depth. `--input` accepts
+multiple roots and `--images` is optional.
+Choose the task with `--mode` and the bbox
 serialization with `--bbox-format` (`qwen` for `[x1, y1, x2, y2]` in 0–1000
 space, or `doclang` for the four `<location>` elements). With `qwen`, every
 prompt that involves a box states that coordinates are integers normalized to
@@ -210,14 +221,16 @@ makes the selection reproducible). Files that cannot be parsed, that contain
 no usable pairs, or that have no matching image are skipped:
 
 ```bash
-python tools/data_creators/build_bbox_data.py --input path/to/docs/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen --max-lines 5000 --seed 42
-python tools/data_creators/build_bbox_data.py --input path/to/pagexml/ --images path/to/images/ --output data/structure --mode line_neighbor --bbox-format qwen --max-n 3
+python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --output data/bbox --mode text_to_bbox --bbox-format qwen --max-lines 5000 --seed 42
+python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --images path/to/images/ --output data/structure --mode line_neighbor --bbox-format qwen --max-n 3
 ```
 
 ## Build region detection training data
 
 To teach the model to detect and label document regions, build SFT examples
-from PAGE XML ground-truth files and their source images. The tool extracts
+from PAGE XML ground-truth files and their source images. PAGE XML is
+discovered in `page` directories at any depth below `--input`, which accepts
+multiple roots; `--images` is optional. The tool extracts
 every PAGE XML region (any element whose tag ends in `Region`, at any nesting
 depth) and fits each polygon to an axis-aligned bounding box. Choose the task
 with `--mode` and the bbox serialization with `--bbox-format` (`qwen` for
@@ -244,9 +257,28 @@ cannot be parsed, that contain no regions, or that have no matching image are
 skipped:
 
 ```bash
-python tools/data_creators/build_region_data.py --input path/to/pagexml/ --images path/to/images/ --output data/regions --mode detect_all --bbox-format qwen
-python tools/data_creators/build_region_data.py --input path/to/pagexml/ --images path/to/images/ --output data/regions_find --mode find_region --bbox-format native --max-lines 5000 --seed 42
+python tools/data_creators/build_region_data.py --input path/to/corpus/ --output data/regions --mode detect_all --bbox-format qwen
+python tools/data_creators/build_region_data.py --input path/to/corpus/ --images path/to/images/ --output data/regions_find --mode find_region --bbox-format native --max-lines 5000 --seed 42
 ```
+
+## Storing images by reference
+
+Datasets embed their images by default, which makes them self-contained but
+large (~4.5 GB per 1000 300-dpi pages) and slow to rebuild. Every data creator
+accepts `--image-mode reference` to store image paths instead and write an
+`image_manifest.json` beside the dataset:
+
+```bash
+python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --output data/bbox --image-mode reference
+python tools/convert_data.py --input data/raw/ --output data/bbox --method sft --image-mode reference
+```
+
+Training entry points decode those images lazily, one batch at a time, so
+nothing is held in memory or on disk inside the dataset. If the corpus has
+moved since the dataset was built, point `data.image_root` at its current
+location; otherwise the roots recorded in the manifest are used. See
+[Storing images: embedded vs. referenced](data_formats.md#storing-images-embedded-vs-referenced)
+for the size/portability trade-off and how resolution works.
 
 ## Dry-run / smoke mode
 
@@ -441,6 +473,21 @@ Run inference:
 python tools/serve.py --model outputs/merged --prompt "Read this document."
 ```
 
+`tools/serve.py` loads the weights locally with `transformers`. To condition on
+document images, pass one or more `--image` flags (local file paths; a vision
+checkpoint is loaded with `AutoModelForImageTextToText`):
+
+```bash
+python tools/serve.py --model outputs/merged --image scan.png \
+  --prompt "Transcribe this document."
+python tools/serve.py --model outputs/merged --image page1.png --image page2.png \
+  --prompt "Compare these pages." --dtype bfloat16 --device cuda
+```
+
+Weights load in `--dtype` (default `auto`) onto `--device` (default: CUDA when
+available, else CPU). Image URLs are not accepted here — serve the model with
+vLLM and use `tools/generate_doclang.py` or `vllm_cli` to send URLs.
+
 ### Serving with vLLM
 
 For production serving (and for the document evaluator and structured DocLang
@@ -470,6 +517,34 @@ The served model name must match the `model` field of
 `tools/generate_doclang.py --model`) so the evaluator and the DocLang
 generator talk to the right model.
 
+### Querying a served model with vllm-cli
+
+For ad-hoc queries against a running server, the separate
+[`vllm_cli`](https://github.com/stefanklut/vllm) package provides a
+command line client for the OpenAI-compatible endpoint. It is an **optional
+external tool**, not a `voxdoc-trainer` dependency: it lives in its own
+repository and its own conda environment (`vllm`), so nothing here imports it.
+
+```bash
+cd ~/Documents/repos/vllm
+mamba run -n vllm python inference.py models
+mamba run -n vllm python inference.py chat "Transcribe this document." --image scan.png
+mamba run -n vllm python inference.py batch -i prompts.jsonl -o results.jsonl -c 8
+```
+
+`--image` is repeatable and takes a local path (sent as a base64 data URL) or
+an `http(s)` URL (fetched by the server). `chat` also supports `--dry-run` to
+inspect the payload, `--json-schema` for constrained output, and `--thinking`
+for reasoning models; `batch` supports `--resume` to retry failed requests.
+Connection settings are read from `VLLM_CLI_BASE_URL`, `VLLM_CLI_API_KEY` and
+`VLLM_CLI_MODEL` (or a `.env` file next to the client); see the
+[client README](https://github.com/stefanklut/vllm/blob/main/README.md) for the
+full list.
+
+Reach for `vllm_cli` when you want a quick prompt or a batch of prompts; use
+`tools/generate_doclang.py` when the output must be validated DocLang, and
+`eval/` for scored runs.
+
 ## Structured DocLang output (inference)
 
 To make a served model emit **only valid DocLang** (`.dclg`), use the
@@ -483,4 +558,15 @@ API, the CLI, and the test suite (including the XSD sync guarantee).
 python tools/generate_doclang.py \
     --base-url http://localhost:8000/v1 --model outputs/merged \
     --image scan.png --out doc.dclg
+```
+
+`--image` may also be a **directory**: every image it contains is generated in
+turn and written as `<out>/<stem>.dclg`, so a whole corpus can be converted in
+one run. Images that fail are reported and skipped (the command exits non-zero
+if any failed) rather than aborting the batch:
+
+```bash
+python tools/generate_doclang.py \
+    --base-url http://localhost:8000/v1 --model outputs/merged \
+    --image scans/ --out data/doclang/
 ```

@@ -47,6 +47,13 @@ class DataConfig:
     dataset_num_proc: int = 4
     shuffle: bool = True
     pad_to_multiple_of: int | None = None
+    image_root: str | None = None
+    """Directory that recorded image paths are remapped onto.
+
+    Only used by datasets built with ``--image-mode reference``. Leave it unset to
+    use the corpus roots recorded in the dataset's image manifest; set it when the
+    corpus has moved or is mounted somewhere else.
+    """
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "DataConfig":

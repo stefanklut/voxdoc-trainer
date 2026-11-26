@@ -14,6 +14,7 @@ from trl import SFTConfig, SFTTrainer
 
 from src.config import RunConfig, load_config
 from src.peft_utils import build_lora_config, build_quantization_config
+from utils.image_loading import wrap_trainer_images
 from utils.logging_utils import get_logger, setup_logger, write_run_metadata
 from utils.paths import run_output_dir
 
@@ -83,6 +84,8 @@ def train(config: RunConfig) -> None:
         peft_config=build_lora_config(config.model),
         quantization_config=build_quantization_config(config.model),
     )
+    if wrap_trainer_images(trainer, train_dataset, eval_dataset, config.data.image_root):
+        logger.info("Decoding images lazily from %s", config.data.image_root or "the recorded corpus roots")
     trainer.train()
     logger.info("SFT training complete. Output in %s", config.training.output_dir)
 

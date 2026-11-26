@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from tools.data_creators.build_bbox_data import (
@@ -34,9 +35,24 @@ from tools.data_creators.build_bbox_data import (
     to_doclang_locations,
     to_qwen_bbox,
 )
+from utils.discovery import DiscoveryError
 
 # The coordinate-space sentence appended to qwen prompts (see _coord_space_note).
 QWEN_NOTE = " All bounding-box coordinates are integers normalized to the 0-1000 range."
+
+
+def _page_dir(tmp_path: Path) -> Path:
+    """Return (creating if needed) the ``page`` directory of a corpus root.
+
+    Args:
+        tmp_path (Path): Corpus root.
+
+    Returns:
+        Path: The ``page`` directory.
+    """
+    page_dir = tmp_path / "page"
+    page_dir.mkdir(exist_ok=True)
+    return page_dir
 
 
 def _make_image(path: Path) -> None:
@@ -152,7 +168,7 @@ def _make_pool(tmp_path: Path, n_files: int, lines_per_file: int) -> Path:
             (f"l{j}", f"0,{j * 10} 100,{j * 10} 100,{j * 10 + 5} 0,{j * 10 + 5}", f"{stem} line {j}")
             for j in range(lines_per_file)
         ]
-        _make_page_xml(tmp_path / f"{stem}.xml", lines)
+        _make_page_xml(_page_dir(tmp_path) / f"{stem}.xml", lines)
         _make_image(images / f"{stem}.png")
     return images
 
@@ -428,7 +444,7 @@ def test_build_sft_record_text_to_bbox_doclang(tmp_path: Path) -> None:
 
 def test_build_dataset_mixed_input(tmp_path: Path) -> None:
     """build_dataset handles a mix of .xml and .dclg files."""
-    _make_page_xml(tmp_path / "a.xml", [("l1", "0,0 100,0 100,25 0,25", "from xml")])
+    _make_page_xml(_page_dir(tmp_path) / "a.xml", [("l1", "0,0 100,0 100,25 0,25", "from xml")])
     _make_doclang(
         tmp_path / "b.dclg",
         '<text><location value="0"/><location value="0"/><location value="100"/><location value="50"/>from dclg</text>',
@@ -446,7 +462,7 @@ def test_build_dataset_mixed_input(tmp_path: Path) -> None:
 
 def test_build_dataset_skips_file_without_image(tmp_path: Path) -> None:
     """A file with pairs but no matching image is skipped."""
-    _make_page_xml(tmp_path / "a.xml", [("l1", "0,0 100,0 100,25 0,25", "text")])
+    _make_page_xml(_page_dir(tmp_path) / "a.xml", [("l1", "0,0 100,0 100,25 0,25", "text")])
     images = tmp_path / "images"
     images.mkdir()
 
@@ -471,7 +487,7 @@ def test_build_dataset_skips_malformed_doclang(tmp_path: Path) -> None:
     """A .dclg missing a required attribute (TypeError) is skipped, not fatal."""
     # <thread/> without thread_id makes doclang_xml_to_model raise TypeError.
     _make_doclang(tmp_path / "bad.dclg", "<text><thread/>x</text>")
-    _make_page_xml(tmp_path / "good.xml", [("l1", "0,0 100,0 100,25 0,25", "ok")])
+    _make_page_xml(_page_dir(tmp_path) / "good.xml", [("l1", "0,0 100,0 100,25 0,25", "ok")])
     images = tmp_path / "images"
     images.mkdir()
     _make_image(images / "bad.png")
@@ -484,13 +500,50 @@ def test_build_dataset_skips_malformed_doclang(tmp_path: Path) -> None:
 
 def test_build_dataset_ignores_other_extensions(tmp_path: Path) -> None:
     """Files that are neither .xml nor .dclg are ignored (not counted as skipped)."""
-    (tmp_path / "notes.txt").write_text("not a doc", encoding="utf-8")
+    _make_page_xml(_page_dir(tmp_path) / "a.xml", [("l1", "0,0 100,0 100,25 0,25", "ok")])
+    (_page_dir(tmp_path) / "notes.txt").write_text("not a doc", encoding="utf-8")
     images = tmp_path / "images"
     images.mkdir()
+    _make_image(images / "a.png")
 
     records, skipped = build_dataset(tmp_path, images, "bbox_to_text", "qwen")
-    assert records == []
     assert skipped == 0
+    assert len(records) == 1
+
+
+def test_build_dataset_discovers_nested_page_dirs(tmp_path: Path) -> None:
+    """PAGE XML nested below the corpus root is discovered."""
+    page_dir = tmp_path / "corpus" / "document_001" / "page"
+    page_dir.mkdir(parents=True)
+    _make_page_xml(page_dir / "doc.xml", [("l1", "0,0 100,0 100,25 0,25", "nested")])
+    _make_image(page_dir.parent / "doc.png")
+
+    records, skipped = build_dataset(tmp_path / "corpus", None, "bbox_to_text", "qwen")
+    assert skipped == 0
+    assert [_completion_text(r) for r in records] == ["nested"]
+
+
+def test_build_dataset_doclang_only_corpus_without_page_dirs(tmp_path: Path) -> None:
+    """A DocLang-only corpus needs no page directory."""
+    _make_doclang(
+        tmp_path / "doc.dclg",
+        '<text><location value="0"/><location value="0"/><location value="100"/><location value="50"/>only dclg</text>',
+        default_resolution=(100, 100),
+    )
+    images = tmp_path / "images"
+    images.mkdir()
+    _make_image(images / "doc.png")
+
+    records, skipped = build_dataset(tmp_path, images, "bbox_to_text", "qwen")
+    assert skipped == 0
+    assert [_completion_text(r) for r in records] == ["only dclg"]
+
+
+def test_build_dataset_raises_when_nothing_is_discoverable(tmp_path: Path) -> None:
+    """A corpus without page-dir XML or DocLang is reported rather than silently empty."""
+    (tmp_path / "flat.xml").write_text("<PcGts><Page/></PcGts>", encoding="utf-8")
+    with pytest.raises(DiscoveryError):
+        build_dataset(tmp_path, None, "bbox_to_text", "qwen")
 
 
 def test_build_dataset_falls_back_to_image_size(tmp_path: Path) -> None:
@@ -859,7 +912,7 @@ def _make_region_pool(tmp_path: Path) -> Path:
     images = tmp_path / "images"
     images.mkdir()
     _make_page_xml_regions(
-        tmp_path / "doc.xml",
+        _page_dir(tmp_path) / "doc.xml",
         [
             (
                 "r1",
@@ -929,7 +982,7 @@ def test_build_dataset_region_mode_ignores_dclg(tmp_path: Path) -> None:
 def test_build_dataset_region_mode_skips_file_without_image(tmp_path: Path) -> None:
     """A .xml file with regions but no matching image is skipped."""
     _make_page_xml_regions(
-        tmp_path / "doc.xml",
+        _page_dir(tmp_path) / "doc.xml",
         [
             (
                 "r1",
@@ -951,7 +1004,7 @@ def test_build_dataset_region_mode_skips_file_without_image(tmp_path: Path) -> N
 def test_build_dataset_region_mode_skips_malformed_xml(tmp_path: Path) -> None:
     """A .xml file that is not well-formed is skipped, not fatal."""
     images = _make_region_pool(tmp_path)
-    (tmp_path / "bad.xml").write_text("<not-closed", encoding="utf-8")
+    (_page_dir(tmp_path) / "bad.xml").write_text("<not-closed", encoding="utf-8")
     records, skipped = build_dataset(tmp_path, images, "line_count", "qwen")
     assert skipped == 1
     assert len(records) == 2
@@ -962,7 +1015,7 @@ def test_build_dataset_region_mode_skips_single_line_regions(tmp_path: Path) -> 
     images = tmp_path / "images"
     images.mkdir()
     _make_page_xml_regions(
-        tmp_path / "doc.xml",
+        _page_dir(tmp_path) / "doc.xml",
         [("r1", "0,0 100,0 100,100 0,100", [("l1", "0,0 100,0 100,25 0,25", "only")])],
     )
     _make_image(images / "doc.png")
@@ -979,3 +1032,49 @@ def test_build_dataset_region_mode_sampling_is_reproducible(tmp_path: Path) -> N
     assert len(records_a) == 5
     assert [_prompt_text(r) for r in records_a] == [_prompt_text(r) for r in records_b]
     assert [_completion_text(r) for r in records_a] == [_completion_text(r) for r in records_b]
+
+
+def test_build_sft_record_reference_mode_stores_path(tmp_path: Path) -> None:
+    """Reference mode stores the image path relative to the corpus root."""
+    image = tmp_path / "images" / "doc.png"
+    image.parent.mkdir()
+    _make_image(image)
+    record = build_sft_record(
+        "bbox_to_text", "qwen", "hello", (0, 0, 100, 25), (100, 100), image, "reference", [tmp_path / "images"]
+    )
+    assert record["images"] == ["doc.png"]
+
+
+def test_build_dataset_flat_reference_mode_stores_relative_paths(tmp_path: Path) -> None:
+    """Line-level modes in reference mode yield string image entries."""
+    images = _make_pool(tmp_path, 1, 2)
+    records, skipped = build_dataset(tmp_path, images, "bbox_to_text", "qwen", image_mode="reference")
+    assert skipped == 0
+    assert records
+    assert all(record["images"] == ["doc0.png"] for record in records)
+
+
+def test_build_dataset_region_reference_mode_stores_relative_paths(tmp_path: Path) -> None:
+    """Region-based modes in reference mode yield string image entries too."""
+    images = _make_region_pool(tmp_path)
+    records, skipped = build_dataset(tmp_path, images, "detect_all", "qwen", image_mode="reference")
+    assert skipped == 0
+    assert records
+    assert all(record["images"] == ["doc.png"] for record in records)
+
+
+def test_build_dataset_embed_mode_unchanged(tmp_path: Path) -> None:
+    """The default mode still embeds decoded images, so existing datasets are unaffected."""
+    images = _make_pool(tmp_path, 1, 2)
+    records, skipped = build_dataset(tmp_path, images, "bbox_to_text", "qwen")
+    assert skipped == 0
+    assert all(isinstance(record["images"][0], Image.Image) for record in records)
+
+
+def test_build_dataset_reference_mode_sampling_unchanged(tmp_path: Path) -> None:
+    """Sampling is independent of the image mode, so both modes select the same rows."""
+    images = _make_region_pool(tmp_path)
+    embedded, _ = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_lines=4, seed=7)
+    referenced, _ = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_lines=4, seed=7, image_mode="reference")
+    assert [_prompt_text(r) for r in embedded] == [_prompt_text(r) for r in referenced]
+    assert all(isinstance(r["images"][0], str) for r in referenced)

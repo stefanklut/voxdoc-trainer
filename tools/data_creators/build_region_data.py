@@ -1,8 +1,15 @@
 """Build SFT training data for region detection and labeling tasks.
 
-This tool turns a directory of PAGE XML (``.xml``) files (plus their source
-images) into SFT examples: the model sees a document image and must emit the
-page's regions as labeled bounding boxes.
+This tool turns PAGE XML (``.xml``) files (plus their source images) into SFT
+examples: the model sees a document image and must emit the page's regions as
+labeled bounding boxes.
+
+``--input`` accepts one or more corpus roots and is searched recursively: PAGE
+XML files are discovered inside directories named ``page`` at any depth, so a
+corpus laid out as ``corpus/document/page/*.xml`` works without pointing at
+each directory. ``--images`` is optional and also accepts multiple roots; when
+it is omitted, images are found from the corpus layout itself (the PAGE XML
+``imageFilename`` attribute, or the directory above the ``page`` directory).
 
 Two task modes:
 
@@ -63,15 +70,27 @@ import random
 import re
 import sys
 import xml.etree.ElementTree as ET
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from datasets import Dataset
 from PIL import Image as PILImage
 
 sys.path.append(str(Path(__file__).resolve().parent.joinpath("..", "..")))
+from utils.discovery import (  # noqa: E402, F401  (find_image is re-exported for callers)
+    DiscoveryError,
+    discover_page_xml,
+    find_image,
+    resolve_image,
+)
+from utils.image_loading import (  # noqa: E402
+    add_image_mode_argument,
+    image_field,
+    image_roots,
+    save_image_dataset,
+)
 from utils.logging_utils import get_logger, setup_logger
 from utils.page_xml_editor import PageXMLEditor
 
@@ -111,23 +130,6 @@ class RegionData:
     label: str
     bbox: tuple[int, int, int, int]
     reading_order: Optional[int]
-
-
-def find_image(image_dir: Path, stem: str) -> Path | None:
-    """Find a source image for a document in any format PIL can open.
-
-    Args:
-        image_dir (Path): Directory to search for the source document image.
-        stem (str): Document stem to match against image filenames.
-
-    Returns:
-        Path | None: The first matching image path, or None if no supported image exists.
-    """
-    for extension in sorted(PILImage.registered_extensions()):
-        candidate = image_dir / f"{stem}{extension}"
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def polygon_to_bbox(points: np.ndarray) -> tuple[int, int, int, int]:
@@ -410,13 +412,22 @@ def build_find_region_candidates(
     return candidates
 
 
-def _make_record(prompt_text: str, completion_text: str, image_path: Path) -> dict:
+def _make_record(
+    prompt_text: str,
+    completion_text: str,
+    image_path: Path,
+    image_mode: str = "embed",
+    roots: Sequence[Path] | None = None,
+) -> dict:
     """Build an SFT record with an image + text prompt and a text completion.
 
     Args:
         prompt_text (str): The user prompt text.
         completion_text (str): The assistant completion text.
         image_path (Path): Path to the source document image.
+        image_mode (str): One of ``utils.image_loading.IMAGE_MODES``; "embed" inlines
+            the image bytes, "reference" stores the image path instead.
+        roots (Sequence[Path] | None): Corpus roots that stored paths are made relative to.
 
     Returns:
         dict: An SFT record with prompt, completion, and images.
@@ -432,46 +443,54 @@ def _make_record(prompt_text: str, completion_text: str, image_path: Path) -> di
             }
         ],
         "completion": [{"role": "assistant", "content": [{"type": "text", "text": completion_text}]}],
-        "images": [PILImage.open(image_path)],
+        "images": image_field(image_path, image_mode, roots),
     }
 
 
 def build_dataset(
-    input_dir: Path,
-    image_dir: Path,
+    input_dir: Path | Sequence[Path],
+    image_dir: Path | Sequence[Path] | None,
     mode: str,
     bbox_format: str,
     max_lines: int | None = None,
     seed: int | None = None,
+    *,
+    image_mode: str = "embed",
 ) -> tuple[list[dict], int]:
-    """Build SFT records from a directory of PAGE XML files.
+    """Build SFT records from the PAGE XML files discovered under the input roots.
 
-    Only ``.xml`` files are considered (DocLang has no region structure).
-    All (prompt, completion) candidates are collected across every input
-    file first; when ``max_lines`` is given and the pool is larger, a random
-    subset of that size is sampled globally (``seed`` makes the selection
+    Only PAGE XML is considered (DocLang has no region structure). All
+    (prompt, completion) candidates are collected across every input file
+    first; when ``max_lines`` is given and the pool is larger, a random subset
+    of that size is sampled globally (``seed`` makes the selection
     reproducible).
 
     Args:
-        input_dir (Path): Directory of PAGE XML (.xml) files.
-        image_dir (Path): Directory of source document images.
+        input_dir (Path | Sequence[Path]): Corpus root(s); PAGE XML is discovered in
+            ``page`` directories at any depth.
+        image_dir (Path | Sequence[Path] | None): Explicit source image directories.
+            When omitted, images are located from the corpus layout.
         mode (str): "detect_all" or "find_region".
         bbox_format (str): "qwen" or "native".
         max_lines (int | None): If set, keep at most this many examples, sampled randomly from the global pool.
         seed (int | None): Random seed for reproducible sampling.
+        image_mode (str): One of ``utils.image_loading.IMAGE_MODES``. "embed" (the
+            default) stores image bytes in the dataset; "reference" stores paths.
 
     Returns:
         tuple[list[dict], int]: The list of SFT records and the number of skipped files.
 
     Raises:
         ValueError: If the mode is not a region mode.
+        DiscoveryError: If no PAGE XML file is found under the input roots.
     """
     if mode not in (MODE_DETECT_ALL, MODE_FIND_REGION):
         raise ValueError(f"Unknown mode: {mode}")
     rng = random.Random(seed)
     candidates: list[tuple[str, str, Path]] = []
     skipped = 0
-    for path in sorted(input_dir.glob("*.xml")):
+    roots = image_roots(input_dir, image_dir)
+    for path in discover_page_xml(input_dir):
         try:
             regions = extract_regions(path)
         except _PARSE_ERRORS as exc:
@@ -482,9 +501,9 @@ def build_dataset(
             logger.warning("Skipping %s: no regions found", path.name)
             skipped += 1
             continue
-        image_path = find_image(image_dir, path.stem)
+        image_path = resolve_image(path, image_dir)
         if image_path is None:
-            logger.warning("Skipping %s: no source image found in %s", path.name, image_dir)
+            logger.warning("Skipping %s: no source image found", path)
             skipped += 1
             continue
         size_wh = declared_size(path)
@@ -502,7 +521,9 @@ def build_dataset(
         candidates = rng.sample(candidates, max_lines)
         rng.shuffle(candidates)
 
-    records = [_make_record(prompt, completion, image_path) for prompt, completion, image_path in candidates]
+    records = [
+        _make_record(prompt, completion, image_path, image_mode, roots) for prompt, completion, image_path in candidates
+    ]
     return records, skipped
 
 
@@ -512,9 +533,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Build SFT region detection and labeling training data from PAGE XML files."
     )
-    parser.add_argument("--input", required=True, help="Directory of PAGE XML (.xml) files.")
+    parser.add_argument(
+        "--input",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="Corpus root(s); PAGE XML files are discovered in 'page' directories at any depth.",
+    )
     parser.add_argument("--output", required=True, help="Path to save the HF dataset.")
-    parser.add_argument("--images", required=True, help="Directory of source document images.")
+    parser.add_argument(
+        "--images",
+        nargs="+",
+        type=Path,
+        default=None,
+        help=(
+            "Optional source image director(ies). When omitted, images are found from the corpus "
+            "layout (the PAGE XML imageFilename attribute, or the directory above the page directory)."
+        ),
+    )
     parser.add_argument(
         "--mode",
         required=True,
@@ -538,18 +574,28 @@ def main() -> None:
         help="If set, randomly sample at most this many examples from the global pool of all input files.",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible --max-lines sampling.")
+    add_image_mode_argument(parser)
     args = parser.parse_args()
 
     if args.max_lines is not None and args.max_lines < 1:
         parser.error("--max-lines must be >= 1")
 
-    input_dir = Path(args.input)
-    image_dir = Path(args.images)
-    records, skipped = build_dataset(input_dir, image_dir, args.mode, args.bbox_format, args.max_lines, args.seed)
+    try:
+        records, skipped = build_dataset(
+            args.input, args.images, args.mode, args.bbox_format, args.max_lines, args.seed, image_mode=args.image_mode
+        )
+    except (DiscoveryError, NotADirectoryError) as exc:
+        parser.error(str(exc))
 
-    dataset = Dataset.from_list(records)
-    dataset.save_to_disk(args.output)
-    logger.info("Built %d %s SFT examples (%s format) -> %s", len(dataset), args.mode, args.bbox_format, args.output)
+    dataset = save_image_dataset(records, args.output, args.image_mode, image_roots(args.input, args.images))
+    logger.info(
+        "Built %d %s SFT examples (%s format, %s images) -> %s",
+        len(dataset),
+        args.mode,
+        args.bbox_format,
+        args.image_mode,
+        args.output,
+    )
     if args.max_lines is not None:
         logger.info("Sampled at most %d examples globally (seed=%s)", args.max_lines, args.seed)
     if skipped:
