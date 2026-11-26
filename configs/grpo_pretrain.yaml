@@ -12,7 +12,10 @@ model:
   lora_r: 16
   lora_alpha: 32
   lora_dropout: 0.05
-  lora_target_modules: [q_proj, v_proj, k_proj, o_proj]
+  # Defaults to every attention, gated-delta-net, MLP and vision projection. Narrow it
+  # only deliberately: a q_proj/k_proj/v_proj/o_proj list reaches just the sparse
+  # full-attention layers, ~10% of the linear modules on a hybrid Qwen3.5 model.
+  # lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
   lora_bias: none
   router_aux_loss_coef: 0.001
 data:
@@ -24,13 +27,19 @@ data:
   # Directory to remap image paths onto, for datasets built with --image-mode reference.
   # Leave null to use the corpus roots recorded in the dataset's image_manifest.json.
   image_root: null
+  # Ceiling on the pixels a page feeds the vision encoder; every patch becomes a
+  # token, so an uncapped 20 Mpx scan costs >16000 tokens per prompt. Null disables.
+  max_pixels: 1003520
 training:
   output_dir: outputs/grpo_pretrain_run
   per_device_train_batch_size: 2
-  gradient_accumulation_steps: 1
+  # TRL requires per_device_train_batch_size * gradient_accumulation_steps to be
+  # divisible by grpo.num_generations: the generation batch holds whole groups of
+  # completions for the same prompt. 2 * 4 == 8 == num_generations.
+  gradient_accumulation_steps: 4
   num_train_epochs: 3
   max_steps: -1
-  learning_rate: 1e-6
+  learning_rate: 1.0e-6
   lr_scheduler_type: linear
   warmup_steps: 0
   weight_decay: 0.0

@@ -339,11 +339,34 @@ Reference-mode datasets are ordinary HF datasets and work with
 strings are read from disk, so the evaluation fingerprint (sha256, raster
 size, mime type) is identical to the embedded equivalent.
 
-Two limitations are worth knowing. Images are **not** resized or recompressed
-by reference mode — the original file is decoded as-is, exactly as the
-embedded mode's `Image.convert("RGB")` would. And because the pixels live
-outside the dataset, deleting or editing the corpus silently changes what the
-dataset trains on; treat the corpus as part of the dataset.
+Two limitations are worth knowing. Reference mode does not resize or recompress
+the **stored** file — it is the original scan, and the dataset records only its
+path. What it decodes at train time is bounded, though: the collator downsamples
+every page to at most `data.max_pixels` pixels (1 003 520, about 1280×784, by
+default) before the processor sees it, using JPEG draft decoding so the full
+resolution is never held in RAM. Set `max_pixels: null` to decode the scan as-is.
+And because the pixels live outside the dataset, deleting or editing the corpus
+silently changes what the dataset trains on; treat the corpus as part of the
+dataset.
+
+### Why the pixel ceiling exists
+
+Every image patch becomes a token in the language model's sequence. A 5000×3990
+archival scan is ~20 megapixels, which an uncapped Qwen-VL processor turns into a
+~16 000 token prompt — enough to dominate both memory and step time while adding
+no signal a 1280×784 rendering lacks. The ceiling is applied in two places, and
+both are needed:
+
+- `data.max_pixels` bounds what the collator decodes from disk.
+- The same value is written to the processor's `size["longest_edge"]` when the
+  trainer loads it, which is the field its resize step actually reads. (The
+  `max_pixels`/`min_pixels` attributes exist on these processors but are only
+  consulted while constructing `size`, so setting them on a built processor has
+  no effect.)
+
+Lower it to fit more pages per batch; raise it when small handwriting needs the
+extra resolution. It applies to reference-mode datasets; embedded datasets carry
+pixels that were already fixed when the dataset was built.
 ## DocLang (historical document transcription)
 
 DocLang (<https://doclang.ai/>) is an AI-native XML document format designed for LLMs
@@ -385,6 +408,24 @@ python tools/data_creators/build_transcription_data.py --input path/to/corpus/ -
 # Or with explicit image directories:
 python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --images path/to/images/ --output data/unicode_transcription
 ```
+
+Lines are ordered region by region: regions are sorted by their page-level
+`readingOrder {index:N;}` and lines by theirs *within* their region. Line-level
+indices are only meaningful among the lines of one region — corpora such as
+NL-HaNA restart them at zero in every region, and sorting lines on their index
+alone interleaves the paragraphs line by line.
+
+Recognisers report a confidence per line on the `TextEquiv` element. Handwritten
+corpora often carry a large minority of lines the recogniser was unsure about,
+and those lines make poor training targets. `--min-conf` drops them:
+
+```bash
+python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --output data/unicode_transcription --min-conf 0.8
+```
+
+Lines with no recorded `conf` attribute are kept — an unscored line is treated as
+trustworthy, not as confidence zero. The same flag exists on
+`build_bbox_data.py`, where it filters `TextLine`s in both flat and region modes.
 
 ## BBox <-> Text (grounding)
 
@@ -431,6 +472,9 @@ python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --output d
 # Or with explicit image directories:
 python tools/data_creators/build_bbox_data.py --input path/to/corpus/ --images path/to/images/ --output data/bbox --mode text_to_bbox --bbox-format qwen
 ```
+
+`--min-conf 0.8` drops `TextLine`s whose `TextEquiv` confidence falls below the
+threshold, in both the flat and the region modes.
 
 ## Region detection and labeling
 

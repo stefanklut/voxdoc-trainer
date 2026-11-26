@@ -42,18 +42,20 @@ from utils.image_loading import (  # noqa: E402
     save_image_dataset,
 )
 from utils.logging_utils import get_logger, setup_logger
-from utils.page_xml_editor import PageXMLEditor
+from utils.page_xml_editor import PageXMLEditor, add_min_conf_argument
 
 logger = get_logger()
 
 PROMPT_TEXT = "Transcribe the text in this document."
 
 
-def extract_transcription(page_xml_path: Path) -> str:
+def extract_transcription(page_xml_path: Path, min_confidence: float | None = None) -> str:
     """Extract the unicode transcription from a PAGE XML file.
 
     Args:
         page_xml_path (Path): Path to a PAGE XML file.
+        min_confidence (float | None): Drop lines whose recognised text has a
+            ``TextEquiv`` confidence below this value. None keeps every line.
 
     Returns:
         str: The transcription text (may be empty if the file has no text lines).
@@ -64,7 +66,7 @@ def extract_transcription(page_xml_path: Path) -> str:
         ValueError: If the file is not a valid PAGE XML document.
     """
     editor = PageXMLEditor(page_xml_path)
-    return editor.get_transcription_text()
+    return editor.get_transcription_text(min_confidence=min_confidence)
 
 
 def build_sft_record(
@@ -104,6 +106,7 @@ def build_dataset(
     image_dir: Path | Sequence[Path] | None = None,
     *,
     image_mode: str = "embed",
+    min_confidence: float | None = None,
 ) -> tuple[list[dict], int]:
     """Build SFT records from the PAGE XML files discovered under the input roots.
 
@@ -118,6 +121,8 @@ def build_dataset(
             When omitted, images are located from the corpus layout.
         image_mode (str): One of ``utils.image_loading.IMAGE_MODES``. "embed" (the
             default) stores image bytes in the dataset; "reference" stores paths.
+        min_confidence (float | None): Drop recognised lines below this ``TextEquiv``
+            confidence from the transcription. None keeps every line.
 
     Returns:
         tuple[list[dict], int]: The list of SFT records and the number of skipped files.
@@ -130,7 +135,7 @@ def build_dataset(
     roots = image_roots(input_dir, image_dir)
     for page_xml_file in discover_page_xml(input_dir):
         try:
-            transcription = extract_transcription(page_xml_file)
+            transcription = extract_transcription(page_xml_file, min_confidence)
         except (FileNotFoundError, ET.ParseError, ValueError) as exc:
             logger.warning("Skipping %s: could not parse PAGE XML (%s)", page_xml_file.name, exc)
             skipped += 1
@@ -171,10 +176,14 @@ def main() -> None:
         ),
     )
     add_image_mode_argument(parser)
+    add_min_conf_argument(parser)
     args = parser.parse_args()
 
+    if args.min_conf is not None and not 0.0 <= args.min_conf <= 1.0:
+        parser.error("--min-conf must be in [0, 1]")
+
     try:
-        records, skipped = build_dataset(args.input, args.images, image_mode=args.image_mode)
+        records, skipped = build_dataset(args.input, args.images, image_mode=args.image_mode, min_confidence=args.min_conf)
     except (DiscoveryError, NotADirectoryError) as exc:
         parser.error(str(exc))
 

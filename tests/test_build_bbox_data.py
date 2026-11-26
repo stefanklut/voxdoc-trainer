@@ -1078,3 +1078,60 @@ def test_build_dataset_reference_mode_sampling_unchanged(tmp_path: Path) -> None
     referenced, _ = build_dataset(tmp_path, images, "line_neighbor", "qwen", max_lines=4, seed=7, image_mode="reference")
     assert [_prompt_text(r) for r in embedded] == [_prompt_text(r) for r in referenced]
     assert all(isinstance(r["images"][0], str) for r in referenced)
+
+
+def _make_page_xml_with_confidence(path: Path, lines: list[tuple[str, float | None]]) -> None:
+    """Write a minimal PAGE XML file whose lines carry recognition confidences.
+
+    Args:
+        path (Path): Where to write the XML file.
+        lines (list[tuple[str, float | None]]): (text, confidence) tuples; a None
+            confidence omits the ``TextEquiv`` ``conf`` attribute.
+    """
+    line_blocks = []
+    for index, (text, confidence) in enumerate(lines):
+        conf = f' conf="{confidence}"' if confidence is not None else ""
+        line_blocks.append(
+            f'      <TextLine id="l{index}">\n'
+            '        <Coords points="0,0 100,0 100,25 0,25"/>\n'
+            f"        <TextEquiv{conf}><Unicode>{text}</Unicode></TextEquiv>\n"
+            f"      </TextLine>"
+        )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">\n'
+        "  <Metadata>\n"
+        "    <Creator>test</Creator>\n"
+        "    <Created>2024-01-01T00:00:00</Created>\n"
+        "    <LastChange>2024-01-01T00:00:00</LastChange>\n"
+        "  </Metadata>\n"
+        '  <Page imageFilename="doc.png" imageWidth="100" imageHeight="100">\n'
+        '    <TextRegion id="r1">\n'
+        '      <Coords points="0,0 100,0 100,100 0,100"/>\n' + "\n".join(line_blocks) + "\n    </TextRegion>\n"
+        "  </Page>\n"
+        "</PcGts>\n"
+    )
+    path.write_text(xml, encoding="utf-8")
+
+
+def test_extract_page_xml_pairs_drops_low_confidence_lines(tmp_path: Path) -> None:
+    """``min_confidence`` keeps confident lines and drops unsure ones."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_confidence(xml_path, [("clear", 0.97), ("guess", 0.31), ("unscored", None)])
+    texts = [text for text, _ in extract_page_xml_pairs(xml_path, min_confidence=0.8)]
+    assert texts == ["clear", "unscored"]
+
+
+def test_extract_page_xml_pairs_keeps_everything_by_default(tmp_path: Path) -> None:
+    """Without a threshold, every recognised line stays a training target."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_confidence(xml_path, [("clear", 0.97), ("guess", 0.31)])
+    assert [text for text, _ in extract_page_xml_pairs(xml_path)] == ["clear", "guess"]
+
+
+def test_extract_page_xml_regions_drops_low_confidence_lines(tmp_path: Path) -> None:
+    """Region mode filters lines the same way flat mode does."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_confidence(xml_path, [("clear", 0.97), ("guess", 0.31)])
+    regions = extract_page_xml_regions(xml_path, min_confidence=0.8)
+    assert [line.text for region in regions for line in region.lines] == ["clear"]

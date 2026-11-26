@@ -350,3 +350,90 @@ def test_main_omits_manifest_in_embed_mode(tmp_path: Path, monkeypatch: pytest.M
     build_transcription_data.main()
 
     assert not (output / "image_manifest.json").exists()
+
+
+def _make_page_xml_with_regions(
+    path: Path, regions: list[tuple[int | None, list[tuple[str, int | None, float | None]]]]
+) -> None:
+    """Write a minimal PAGE XML file with several text regions.
+
+    Args:
+        path (Path): Where to write the XML file.
+        regions (list[tuple[int | None, list[tuple[str, int | None, float | None]]]]):
+            One entry per region: the region's reading-order index, and a list of
+            ``(line_id, line_reading_order, confidence)`` tuples in document order.
+            A None confidence omits the ``TextEquiv`` ``conf`` attribute.
+    """
+    region_blocks = []
+    for region_index, lines in regions:
+        line_blocks = []
+        for line_id, reading_order, confidence in lines:
+            custom = f' custom="readingOrder {{index:{reading_order};}}"' if reading_order is not None else ""
+            conf = f' conf="{confidence}"' if confidence is not None else ""
+            line_blocks.append(
+                f'      <TextLine id="{line_id}"{custom}>\n'
+                '        <Coords points="0,0 100,0 100,25 0,25"/>\n'
+                f"        <TextEquiv{conf}><Unicode>{line_id}</Unicode></TextEquiv>\n"
+                f"      </TextLine>"
+            )
+        region_custom = f' custom="readingOrder {{index:{region_index};}}"' if region_index is not None else ""
+        region_blocks.append(
+            f'    <TextRegion id="r{region_index}"{region_custom}>\n'
+            '      <Coords points="0,0 100,0 100,100 0,100"/>\n' + "\n".join(line_blocks) + "\n    </TextRegion>"
+        )
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15">\n'
+        "  <Metadata>\n"
+        "    <Creator>test</Creator>\n"
+        "    <Created>2024-01-01T00:00:00</Created>\n"
+        "    <LastChange>2024-01-01T00:00:00</LastChange>\n"
+        "  </Metadata>\n"
+        '  <Page imageFilename="doc.png" imageWidth="100" imageHeight="100">\n' + "\n".join(region_blocks) + "\n  </Page>\n"
+        "</PcGts>\n"
+    )
+    path.write_text(xml, encoding="utf-8")
+
+
+def test_extract_transcription_keeps_sibling_scoped_line_orders_in_regions(tmp_path: Path) -> None:
+    """Line reading orders restart at zero in every region, so they must not interleave regions.
+
+    The NL-HaNA corpus numbers lines from zero inside each region while numbering
+    regions once per page. Sorting lines on their index alone interleaves the
+    paragraphs line by line, which is what the transcription target must avoid.
+    """
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_regions(
+        xml_path,
+        [
+            (1, [("a1", 0, None), ("a2", 1, None)]),
+            (0, [("b1", 0, None), ("b2", 1, None)]),
+        ],
+    )
+    assert extract_transcription(xml_path) == "b1\nb2\na1\na2"
+
+
+def test_extract_transcription_drops_low_confidence_lines(tmp_path: Path) -> None:
+    """``min_confidence`` removes lines the recogniser was unsure about."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_regions(xml_path, [(0, [("good", 0, 0.95), ("bad", 1, 0.42)])])
+    assert extract_transcription(xml_path, min_confidence=0.8) == "good"
+
+
+def test_extract_transcription_keeps_lines_without_confidence(tmp_path: Path) -> None:
+    """A line with no recorded confidence counts as trustworthy, not as zero."""
+    xml_path = tmp_path / "doc.xml"
+    _make_page_xml_with_regions(xml_path, [(0, [("unscored", 0, None)])])
+    assert extract_transcription(xml_path, min_confidence=0.8) == "unscored"
+
+
+def test_build_dataset_applies_min_confidence(tmp_path: Path) -> None:
+    """The creator's ``min_confidence`` reaches the transcription target."""
+    page_dir = _make_page_dir(tmp_path)
+    _make_image(tmp_path / "doc.png")
+    _make_page_xml_with_regions(page_dir / "doc.xml", [(0, [("keep", 0, 0.99), ("drop", 1, 0.10)])])
+    records, skipped = build_dataset(tmp_path, min_confidence=0.8)
+    assert skipped == 0
+    assert len(records) == 1
+    text = records[0]["completion"][0]["content"][0]["text"]
+    assert text == "keep"

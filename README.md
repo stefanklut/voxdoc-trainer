@@ -65,8 +65,10 @@ mamba activate voxdoc-trainer
 Data creators embed images in the dataset by default, which is portable but
 heavy (~4.5 GB per 1000 300-dpi pages). Pass `--image-mode reference` to any
 creator to store image paths plus an `image_manifest.json` instead, keeping the
-dataset at a few megabytes; training decodes images lazily per batch. Point
-`data.image_root` at the corpus if it has moved. See
+dataset at a few megabytes; training decodes images lazily per batch, downscaled
+to at most `data.max_pixels` (1 003 520 by default) so a 20-megapixel scan does
+not become a 16 000-token prompt. Point `data.image_root` at the corpus if it has
+moved. See
 [storing images](docs/data_formats.md#storing-images-embedded-vs-referenced).
 
 ## Documentation

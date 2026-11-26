@@ -11,8 +11,8 @@ from datasets import load_from_disk
 from trl import KTOConfig, KTOTrainer
 
 from src.config import RunConfig, load_config
-from src.peft_utils import build_lora_config, build_quantization_config
-from utils.image_loading import wrap_trainer_images
+from src.peft_utils import build_lora_config, build_quantization_config, log_lora_coverage
+from utils.image_loading import load_processor, wrap_trainer_images
 from utils.logging_utils import get_logger, setup_logger, write_run_metadata
 from utils.paths import run_output_dir
 
@@ -72,17 +72,20 @@ def train(config: RunConfig) -> None:
 
     train_dataset = load_from_disk(config.data.train_path)
     eval_dataset = load_from_disk(config.data.eval_path) if config.data.eval_path else None
+    processor = load_processor(config.model.model_id, config.model.trust_remote_code, config.data.max_pixels)
 
     trainer = KTOTrainer(
         model=config.model.model_id,
         args=build_kto_config(config),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
+        processing_class=processor,
         peft_config=build_lora_config(config.model),
         quantization_config=build_quantization_config(config.model),
     )
-    if wrap_trainer_images(trainer, train_dataset, eval_dataset, config.data.image_root):
+    if wrap_trainer_images(trainer, train_dataset, eval_dataset, config.data.image_root, config.data.max_pixels):
         logger.info("Decoding images lazily from %s", config.data.image_root or "the recorded corpus roots")
+    log_lora_coverage(trainer.model, config.model)
     trainer.train()
     logger.info("KTO training complete. Output in %s", config.training.output_dir)
 

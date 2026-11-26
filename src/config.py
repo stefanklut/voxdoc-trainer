@@ -13,6 +13,71 @@ from typing import Any
 
 import yaml
 
+from utils.image_loading import DEFAULT_MAX_PIXELS
+from utils.logging_utils import get_logger
+
+logger = get_logger()
+
+#: Numeric field types that :func:`_build_kwargs` coerces a YAML string back into.
+_NUMERIC_TYPES = {"float": float, "int": int}
+
+
+def _numeric_type(field_type: str) -> type | None:
+    """Return the numeric type a dataclass field annotation asks for.
+
+    Annotations are read as text (the module uses ``from __future__ import
+    annotations``), so both ``"float"`` and the optional spelling
+    ``"float | None"`` have to be recognised.
+
+    Args:
+        field_type (str): The field's annotation as written in the source.
+
+    Returns:
+        type | None: :class:`float` or :class:`int`, or None when the field is not
+            numeric.
+    """
+    for part in field_type.replace("Optional[", "").replace("]", "").split("|"):
+        numeric = _NUMERIC_TYPES.get(part.strip())
+        if numeric is not None:
+            return numeric
+    return None
+
+
+def _build_kwargs(cls: type, raw: dict[str, Any], context: str) -> dict[str, Any]:
+    """Select the known fields of a dataclass from a raw mapping, coercing numbers.
+
+    YAML 1.1 only recognises scientific notation when it carries a decimal point,
+    so a learning rate written as ``1e-4`` arrives as the *string* ``"1e-4"`` and
+    would otherwise reach the optimizer as a string. Such values are converted here
+    so a config reads the way it looks, and a numeric field holding something that
+    is not a number is rejected at load time rather than deep inside a trainer.
+
+    Args:
+        cls (type): The dataclass being built.
+        raw (dict[str, Any]): The raw mapping parsed from YAML.
+        context (str): Section name used when reporting unknown keys.
+
+    Returns:
+        dict[str, Any]: Keyword arguments accepted by ``cls``.
+
+    Raises:
+        ValueError: If a numeric field is given a value that is not a number.
+    """
+    known = {f.name: f for f in fields(cls)}
+    kwargs: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in known:
+            logger.warning("Ignoring unknown key '%s' in config section '%s'", key, context)
+            continue
+        numeric = _numeric_type(str(known[key].type))
+        if numeric is not None and isinstance(value, str):
+            try:
+                value = numeric(value)
+            except ValueError:
+                raise ValueError(f"Config '{context}.{key}' must be a {numeric.__name__}, got {value!r}") from None
+        kwargs[key] = value
+    return kwargs
+
 
 @dataclass
 class ModelConfig:
@@ -25,15 +90,38 @@ class ModelConfig:
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
-    lora_target_modules: list[str] = field(default_factory=lambda: ["q_proj", "v_proj", "k_proj", "o_proj"])
+    # Every projection a Qwen3.5 block owns: the gated-delta-net linear attention
+    # (in_proj_*/out_proj), the sparse full attention (q/k/v/o_proj), the MLP, and
+    # the vision tower (qkv/proj/linear_fc*). The usual q/k/v/o_proj quartet alone
+    # reaches only the handful of full-attention layers -- 10% of the linear
+    # modules on a 27B hybrid model -- which leaves most of the network frozen.
+    lora_target_modules: list[str] = field(
+        default_factory=lambda: [
+            "in_proj_qkv",
+            "in_proj_z",
+            "in_proj_a",
+            "in_proj_b",
+            "out_proj",
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+            "qkv",
+            "proj",
+            "linear_fc1",
+            "linear_fc2",
+        ]
+    )
     lora_bias: str = "none"
     router_aux_loss_coef: float = 0.001
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ModelConfig":
         """Build a ModelConfig from a dict, ignoring unknown keys."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        return cls(**_build_kwargs(cls, raw, "model"))
 
 
 @dataclass
@@ -54,12 +142,20 @@ class DataConfig:
     use the corpus roots recorded in the dataset's image manifest; set it when the
     corpus has moved or is mounted somewhere else.
     """
+    max_pixels: int | None = DEFAULT_MAX_PIXELS
+    """Largest number of pixels a page may contribute to the vision encoder.
+
+    Document scans are far larger than the encoder can use, and every patch it
+    receives becomes a token in the language model's sequence. The ceiling is
+    applied both to the processor and while decoding reference-mode images. Set
+    it to None to feed images at their native resolution, which costs memory and
+    step time roughly in proportion to the extra pixels.
+    """
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "DataConfig":
         """Build a DataConfig from a dict, ignoring unknown keys."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        return cls(**_build_kwargs(cls, raw, "data"))
 
 
 @dataclass
@@ -100,8 +196,7 @@ class TrainingConfig:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "TrainingConfig":
         """Build a TrainingConfig from a dict, ignoring unknown keys."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        return cls(**_build_kwargs(cls, raw, "training"))
 
 
 @dataclass
@@ -140,8 +235,7 @@ class GRPOConfig:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "GRPOConfig":
         """Build a GRPOConfig from a dict, ignoring unknown keys."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in raw.items() if k in known})
+        return cls(**_build_kwargs(cls, raw, "grpo"))
 
 
 @dataclass
@@ -168,6 +262,7 @@ class RunConfig:
         kwargs: dict[str, Any] = {}
         for key, value in raw.items():
             if key not in known:
+                logger.warning("Ignoring unknown key '%s' in config", key)
                 continue
             if isinstance(value, dict):
                 type_name = known[key].type

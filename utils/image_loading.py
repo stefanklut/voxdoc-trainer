@@ -35,6 +35,7 @@ moved or is mounted elsewhere.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -42,17 +43,24 @@ from typing import Any
 from datasets import Dataset
 from PIL import Image as PILImage
 
+from utils.logging_utils import get_logger
+
+logger = get_logger()
+
 __all__ = [
+    "DEFAULT_MAX_PIXELS",
     "IMAGE_MODES",
     "MANIFEST_NAME",
     "MANIFEST_VERSION",
     "ImageNotFoundError",
     "LazyImageCollator",
     "add_image_mode_argument",
+    "cap_processor_pixels",
     "dataset_output_dir",
     "image_field",
     "image_roots",
     "is_reference_dataset",
+    "load_processor",
     "read_image_manifest",
     "relative_image_path",
     "resolve_image_path",
@@ -63,6 +71,15 @@ __all__ = [
 
 #: Supported values for ``--image-mode``.
 IMAGE_MODES = ("embed", "reference")
+
+#: Ceiling on the pixels a document page contributes to a vision-language model.
+#:
+#: Scanned pages are routinely 20 megapixels, and a vision encoder turns every
+#: patch into a token in the language model's sequence: an uncapped 5000x3900
+#: page costs over 16000 tokens, which dominates both memory and step time while
+#: adding little that a downsampled page does not still carry. This ceiling keeps
+#: a full page near 1000 tokens.
+DEFAULT_MAX_PIXELS = 1_003_520
 
 #: Name of the sidecar that records the image mode and the corpus roots.
 MANIFEST_NAME = "image_manifest.json"
@@ -83,6 +100,106 @@ _IMAGE_MODE_HELP = (
 
 class ImageNotFoundError(FileNotFoundError):
     """Raised when a stored image path cannot be resolved to an existing file."""
+
+
+def cap_processor_pixels(processor: Any, max_pixels: int = DEFAULT_MAX_PIXELS) -> bool:
+    """Limit how many pixels a vision-language processor feeds to its image encoder.
+
+    Document scans are far larger than a vision encoder can use, and every patch
+    becomes a token in the language model's sequence, so an uncapped page inflates
+    memory and step time without adding signal. The ceiling is written to the
+    processor's ``size`` mapping, which is what its resize step actually reads:
+    ``max_pixels``/``min_pixels`` attributes exist on some processors but are only
+    consulted while constructing ``size``, so setting them on a built processor
+    has no effect.
+
+    Args:
+        processor (Any): The processor whose image encoder should be capped. Its
+            image processor is capped directly; a bare image processor works too.
+        max_pixels (int): Largest number of pixels the encoder may receive.
+
+    Returns:
+        bool: True when a ceiling was applied, False when the processor has no
+            resizable image encoder to cap.
+    """
+    image_processor = getattr(processor, "image_processor", processor)
+    size = getattr(image_processor, "size", None)
+    # ``size`` is a transformers SizeDict (a dataclass that merely *behaves* like a
+    # mapping), so it has to be probed for the key rather than tested with isinstance.
+    if size is None or "longest_edge" not in size:
+        return False
+    if size["longest_edge"] <= max_pixels:
+        return True
+    # Copy before mutating: the mapping may be shared with the class-level defaults.
+    try:
+        capped: Any = type(size)(**dict(size))
+    except (TypeError, ValueError):
+        capped = dict(size)
+    capped["longest_edge"] = max_pixels
+    image_processor.size = capped
+    return True
+
+
+def load_processor(model_id: str, trust_remote_code: bool = False, max_pixels: int | None = DEFAULT_MAX_PIXELS) -> Any:
+    """Load a model's processor and cap the pixels its image encoder receives.
+
+    Trainers hand this to TRL as ``processing_class``. Passing the processor (not
+    just a tokenizer) is what lets a vision-language model tokenize its image
+    placeholders, and capping it here is what keeps a 20 megapixel scan from
+    becoming a 16000 token prompt.
+
+    Args:
+        model_id (str): Model identifier or local path.
+        trust_remote_code (bool): Whether to run model code from the hub.
+        max_pixels (int | None): Largest number of pixels the image encoder may
+            receive, or None to leave the processor's own limits in place.
+
+    Returns:
+        Any: The processor, ready to pass as ``processing_class``.
+    """
+    # Imported lazily: the data creators import this module for its path helpers
+    # and should not pay for loading transformers.
+    from transformers import AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    if max_pixels is not None and cap_processor_pixels(processor, max_pixels):
+        logger.info("Capping image input at %s pixels", f"{max_pixels:,}")
+    return processor
+
+
+def _draft_size(size: tuple[int, int], max_pixels: int) -> tuple[int, int]:
+    """Scale ``size`` down to at most ``max_pixels``, for a JPEG decoder's draft mode.
+
+    Args:
+        size (tuple[int, int]): The image's native ``(width, height)``.
+        max_pixels (int): Largest number of pixels to allow.
+
+    Returns:
+        tuple[int, int]: The ``(width, height)`` to request from ``Image.draft``.
+    """
+    width, height = size
+    if max_pixels <= 0 or width * height <= max_pixels:
+        return size
+    scale = (max_pixels / (width * height)) ** 0.5
+    # Floor, not round: rounding either edge up can put the product back over the ceiling.
+    return max(1, math.floor(width * scale)), max(1, math.floor(height * scale))
+
+
+def _resize_to_max_pixels(image: PILImage.Image, max_pixels: int) -> PILImage.Image:
+    """Return ``image`` shrunk so it holds at most ``max_pixels``, unchanged if it already does.
+
+    Args:
+        image (PILImage.Image): The decoded image.
+        max_pixels (int): Largest number of pixels to allow.
+
+    Returns:
+        PILImage.Image: The image at, or below, the ceiling.
+    """
+    width, height = image.size
+    if max_pixels <= 0 or width * height <= max_pixels:
+        return image
+    target_width, target_height = _draft_size((width, height), max_pixels)
+    return image.resize((target_width, target_height), PILImage.LANCZOS)
 
 
 def _resolve_paths(paths: Sequence[Path | str] | Path | str | None) -> list[Path]:
@@ -411,6 +528,7 @@ class LazyImageCollator:
         collator: Any,
         roots: Sequence[Path | str] | Path | str | None = None,
         image_root: Path | str | None = None,
+        max_pixels: int | None = DEFAULT_MAX_PIXELS,
     ) -> None:
         """Store the wrapped collator and the roots its image paths resolve against.
 
@@ -418,10 +536,13 @@ class LazyImageCollator:
             collator (Any): The collator to delegate to once images are decoded.
             roots (Sequence[Path | str] | Path | str | None): Roots recorded in the manifest.
             image_root (Path | str | None): Replacement root for a moved corpus.
+            max_pixels (int | None): Largest number of pixels to decode an image at,
+                or None to decode at the native resolution of the source file.
         """
         self._collator = collator
         self._roots = _resolve_paths(roots)
         self._image_root = image_root
+        self._max_pixels = max_pixels
 
     @property
     def wrapped_collator(self) -> Any:
@@ -483,7 +604,7 @@ class LazyImageCollator:
         return example
 
     def _open(self, value: str) -> PILImage.Image:
-        """Open one stored image path.
+        """Open one stored image path, downscaled to :attr:`max_pixels`.
 
         Args:
             value (str): The path recorded in the dataset.
@@ -496,9 +617,18 @@ class LazyImageCollator:
         """
         path = resolve_image_path(value, self._roots, self._image_root)
         with PILImage.open(path) as opened:
+            # Ask a JPEG decoder to sample its DCT blocks down before it builds
+            # the full raster. Without this, decoding a 20 megapixel scan costs
+            # ~58 MB of pixels per page even though we discard most of them below.
+            if self._max_pixels is not None:
+                opened.draft(None, _draft_size(opened.size, self._max_pixels))
             # Force the pixel data in before the file handle closes, so the image
             # stays usable once this method returns.
             opened.load()
+            # draft() only snaps to a JPEG's available power-of-two reductions, so
+            # it can land above the ceiling; resize() makes the bound exact.
+            if self._max_pixels is not None:
+                opened = _resize_to_max_pixels(opened, self._max_pixels)
             return opened
 
     def __getattr__(self, name: str) -> Any:
@@ -520,6 +650,7 @@ def wrap_trainer_collator(
     dataset: Dataset,
     image_root: Path | str | None = None,
     dataset_dir: Path | str | None = None,
+    max_pixels: int | None = DEFAULT_MAX_PIXELS,
 ) -> bool:
     """Make a trainer decode reference-mode images lazily, if its dataset uses them.
 
@@ -533,6 +664,8 @@ def wrap_trainer_collator(
         image_root (Path | str | None): Replacement root for a corpus that moved.
         dataset_dir (Path | str | None): Dataset directory to read the sidecar from;
             discovered from ``dataset`` when omitted.
+        max_pixels (int | None): Largest number of pixels to decode an image at,
+            or None to decode at the native resolution of the source file.
 
     Returns:
         bool: True when the collator was wrapped, False when the dataset already
@@ -552,7 +685,7 @@ def wrap_trainer_collator(
         existing.add_roots(roots)
         return True
 
-    trainer.data_collator = LazyImageCollator(existing, roots, image_root)
+    trainer.data_collator = LazyImageCollator(existing, roots, image_root, max_pixels)
     return True
 
 
@@ -561,6 +694,7 @@ def wrap_trainer_images(
     train_dataset: Dataset,
     eval_dataset: Dataset | None = None,
     image_root: Path | str | None = None,
+    max_pixels: int | None = DEFAULT_MAX_PIXELS,
 ) -> bool:
     """Make a trainer decode reference-mode images lazily for both its datasets.
 
@@ -573,11 +707,13 @@ def wrap_trainer_images(
         train_dataset (Dataset): The training dataset.
         eval_dataset (Dataset | None): The evaluation dataset, when configured.
         image_root (Path | str | None): Replacement root for a corpus that moved.
+        max_pixels (int | None): Largest number of pixels to decode an image at,
+            or None to decode at the native resolution of the source file.
 
     Returns:
         bool: True when the collator was wrapped, False when nothing needed to change.
     """
-    wrapped = wrap_trainer_collator(trainer, train_dataset, image_root)
-    if eval_dataset is not None and wrap_trainer_collator(trainer, eval_dataset, image_root):
+    wrapped = wrap_trainer_collator(trainer, train_dataset, image_root, max_pixels=max_pixels)
+    if eval_dataset is not None and wrap_trainer_collator(trainer, eval_dataset, image_root, max_pixels=max_pixels):
         wrapped = True
     return wrapped

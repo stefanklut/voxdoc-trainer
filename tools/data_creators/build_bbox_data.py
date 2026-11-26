@@ -99,7 +99,7 @@ from utils.image_loading import (  # noqa: E402
     save_image_dataset,
 )
 from utils.logging_utils import get_logger, setup_logger
-from utils.page_xml_editor import PageXMLEditor
+from utils.page_xml_editor import PageXMLEditor, add_min_conf_argument, is_low_confidence
 
 logger = get_logger()
 
@@ -168,13 +168,17 @@ def polygon_to_bbox(points: np.ndarray) -> tuple[int, int, int, int]:
     return (x1, y1, x2, y2)
 
 
-def extract_page_xml_pairs(page_xml_path: Path) -> list[tuple[str, tuple[int, int, int, int]]]:
+def extract_page_xml_pairs(
+    page_xml_path: Path, min_confidence: float | None = None
+) -> list[tuple[str, tuple[int, int, int, int]]]:
     """Extract (text, bbox) pairs from the TextLines of a PAGE XML file.
 
     Lines with empty text or without a ``Coords`` polygon are skipped.
 
     Args:
         page_xml_path (Path): Path to a PAGE XML file.
+        min_confidence (float | None): Drop lines whose recognised text has a
+            ``TextEquiv`` confidence below this value. None keeps every line.
 
     Returns:
         list[tuple[str, tuple[int, int, int, int]]]: (text, (x1, y1, x2, y2)) pairs in document order.
@@ -190,6 +194,8 @@ def extract_page_xml_pairs(page_xml_path: Path) -> list[tuple[str, tuple[int, in
         text = editor.get_text(line).strip()
         if not text:
             continue
+        if is_low_confidence(editor.get_text_confidence(line), min_confidence):
+            continue
         try:
             bbox = polygon_to_bbox(editor.get_coords(line))
         except ValueError as exc:
@@ -199,7 +205,7 @@ def extract_page_xml_pairs(page_xml_path: Path) -> list[tuple[str, tuple[int, in
     return pairs
 
 
-def extract_page_xml_regions(page_xml_path: Path) -> list[RegionData]:
+def extract_page_xml_regions(page_xml_path: Path, min_confidence: float | None = None) -> list[RegionData]:
     """Extract text regions with their ordered text lines from a PAGE XML file.
 
     Each ``TextRegion`` yields a :class:`RegionData` whose ``lines`` are the
@@ -210,6 +216,8 @@ def extract_page_xml_regions(page_xml_path: Path) -> list[RegionData]:
 
     Args:
         page_xml_path (Path): Path to a PAGE XML file.
+        min_confidence (float | None): Drop lines whose recognised text has a
+            ``TextEquiv`` confidence below this value. None keeps every line.
 
     Returns:
         list[RegionData]: Regions in document order, each with its lines in reading order.
@@ -231,6 +239,8 @@ def extract_page_xml_regions(page_xml_path: Path) -> list[RegionData]:
         for line in region.iterfind(".//TextLine"):
             text = editor.get_text(line).strip()
             if not text:
+                continue
+            if is_low_confidence(editor.get_text_confidence(line), min_confidence):
                 continue
             try:
                 line_bbox = polygon_to_bbox(editor.get_coords(line))
@@ -839,6 +849,7 @@ def _build_flat_dataset(
     max_lines: int | None = None,
     seed: int | None = None,
     image_mode: str = "embed",
+    min_confidence: float | None = None,
 ) -> tuple[list[dict], int]:
     """Build SFT records for a line-level mode from PAGE XML and DocLang files.
 
@@ -871,7 +882,7 @@ def _build_flat_dataset(
     for path in files:
         try:
             if path.suffix == ".xml":
-                pairs = extract_page_xml_pairs(path)
+                pairs = extract_page_xml_pairs(path, min_confidence)
             else:
                 pairs = extract_doclang_pairs(path)
         except _PARSE_ERRORS as exc:
@@ -915,6 +926,7 @@ def _build_region_dataset(
     seed: int | None = None,
     max_n: int = 3,
     image_mode: str = "embed",
+    min_confidence: float | None = None,
 ) -> tuple[list[dict], int]:
     """Build SFT records for a region-based mode from PAGE XML files.
 
@@ -948,7 +960,7 @@ def _build_region_dataset(
     roots = image_roots(input_dir, image_dir)
     for path in discover_page_xml(input_dir):
         try:
-            regions = extract_page_xml_regions(path)
+            regions = extract_page_xml_regions(path, min_confidence)
         except _PARSE_ERRORS as exc:
             logger.warning("Skipping %s: could not parse (%s)", path.name, exc)
             skipped += 1
@@ -988,6 +1000,7 @@ def build_dataset(
     max_n: int = 3,
     *,
     image_mode: str = "embed",
+    min_confidence: float | None = None,
 ) -> tuple[list[dict], int]:
     """Build SFT records from the PAGE XML and DocLang files under the input roots.
 
@@ -1010,6 +1023,8 @@ def build_dataset(
         max_n (int): Maximum line offset for the line_neighbor mode.
         image_mode (str): One of ``utils.image_loading.IMAGE_MODES``. "embed" (the
             default) stores image bytes in the dataset; "reference" stores paths.
+        min_confidence (float | None): Drop recognised lines below this ``TextEquiv``
+            confidence. None keeps every line.
 
     Returns:
         tuple[list[dict], int]: The list of SFT records and the number of skipped files.
@@ -1018,8 +1033,10 @@ def build_dataset(
         DiscoveryError: If no usable document is found under the input roots.
     """
     if mode in REGION_MODES:
-        return _build_region_dataset(input_dir, image_dir, mode, bbox_format, max_lines, seed, max_n, image_mode)
-    return _build_flat_dataset(input_dir, image_dir, mode, bbox_format, max_lines, seed, image_mode)
+        return _build_region_dataset(
+            input_dir, image_dir, mode, bbox_format, max_lines, seed, max_n, image_mode, min_confidence
+        )
+    return _build_flat_dataset(input_dir, image_dir, mode, bbox_format, max_lines, seed, image_mode, min_confidence)
 
 
 def main() -> None:
@@ -1078,12 +1095,15 @@ def main() -> None:
         help="line_neighbor only: maximum line offset (1..max-n) to consider above/below the reference line.",
     )
     add_image_mode_argument(parser)
+    add_min_conf_argument(parser)
     args = parser.parse_args()
 
     if args.max_lines is not None and args.max_lines < 1:
         parser.error("--max-lines must be >= 1")
     if args.max_n < 1:
         parser.error("--max-n must be >= 1")
+    if args.min_conf is not None and not 0.0 <= args.min_conf <= 1.0:
+        parser.error("--min-conf must be in [0, 1]")
 
     try:
         records, skipped = build_dataset(
@@ -1095,6 +1115,7 @@ def main() -> None:
             args.seed,
             args.max_n,
             image_mode=args.image_mode,
+            min_confidence=args.min_conf,
         )
     except (DiscoveryError, NotADirectoryError) as exc:
         parser.error(str(exc))

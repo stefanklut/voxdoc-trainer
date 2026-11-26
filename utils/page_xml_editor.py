@@ -3,7 +3,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 
@@ -190,6 +190,53 @@ class PageXML(ET.ElementTree):
         else:
             if level and (not elem.tail or not elem.tail.strip()):
                 elem.tail = i
+
+
+def is_low_confidence(confidence: Optional[float], min_confidence: Optional[float]) -> bool:
+    """Report whether recognised text falls below a confidence threshold.
+
+    Handwritten-text recognition reports a confidence per line, and a corpus can
+    carry a large minority of lines the recogniser was unsure about. Those lines
+    make poor training targets, so creators let callers drop them. Text with no
+    recorded confidence is treated as trustworthy rather than discarded.
+
+    Args:
+        confidence (Optional[float]): The line's reported confidence, or None.
+        min_confidence (Optional[float]): The threshold to enforce, or None to keep
+            everything.
+
+    Returns:
+        bool: True when the line should be dropped.
+    """
+    if min_confidence is None or confidence is None:
+        return False
+    return confidence < min_confidence
+
+
+def add_min_conf_argument(parser: Any, default: Optional[float] = None) -> None:
+    """Add a ``--min-conf`` flag to an argparse parser.
+
+    Shared by every creator that uses recognised text as a training target, so the
+    flag and its help text stay identical everywhere.
+
+    Args:
+        parser (Any): The ``argparse.ArgumentParser`` to extend.
+        default (Optional[float]): The default threshold. None keeps every line, so
+            existing commands keep producing the same datasets.
+    """
+    parser.add_argument(
+        "--min-conf",
+        dest="min_conf",
+        type=float,
+        default=default,
+        metavar="CONF",
+        help=(
+            "Drop text lines whose recognised transcription has a TextEquiv confidence below CONF "
+            "(a value in [0, 1]). Handwritten-text recognition is often confidently wrong, and those "
+            "lines teach the model to make the same mistakes. Lines with no recorded confidence are "
+            "kept. Unset by default, which keeps every line."
+        ),
+    )
 
 
 class PageXMLEditor(PageXML):
@@ -412,6 +459,28 @@ class PageXMLEditor(PageXML):
             else:
                 return child_node.text
 
+    def get_text_confidence(self, element: ET.Element) -> Optional[float]:
+        """Read the confidence the recogniser reported for an element's text.
+
+        Args:
+            element (ET.Element): A ``TextLine`` or ``TextRegion`` element.
+
+        Returns:
+            Optional[float]: The ``TextEquiv`` ``conf`` attribute in ``[0, 1]``, or
+                None when the element carries no text or no confidence.
+        """
+        text_node = element.find("TextEquiv")
+        if text_node is None:
+            return None
+        raw = text_node.attrib.get("conf")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except ValueError:
+            self.logger.info(f"Unparseable text confidence '{raw}' on {self.get_id(element)} at {self.filepath}")
+            return None
+
     def get_transcription(self):
         """Extracts text from each line on the XML file"""
         data = {}
@@ -423,28 +492,60 @@ class PageXMLEditor(PageXML):
 
         return data
 
-    def get_transcription_text(self) -> str:
+    def get_transcription_text(self, min_confidence: Optional[float] = None) -> str:
         """Extract the full transcription as a single unicode string.
 
-        Lines are joined with newlines and ordered by their reading order
-        (parsed from the ``custom`` attribute) when available; lines without a
-        reading order keep their document order and are placed last.
+        Regions are ordered by their reading order and their lines by theirs, so
+        the text of one region always stays together. Reading order indices are
+        scoped to the element that declares them: corpora that number lines from
+        zero inside every region (rather than once per page) would otherwise have
+        their paragraphs interleaved line by line. Lines without a reading order
+        keep their document order and are placed last within their region.
+
+        Args:
+            min_confidence (Optional[float]): Drop lines whose recognised text has
+                a ``TextEquiv`` confidence below this value. Lines with no
+                recorded confidence are kept. None keeps every line.
 
         Returns:
             str: The transcription text, or an empty string if there is none.
         """
-        lines: list[tuple[Optional[int], int, str]] = []
-        for index, line in enumerate(self.iterfind(".//TextLine")):
-            text = self.get_text(line).strip()
-            if not text:
-                continue
-            reading_order = self._parse_reading_order(line)
-            lines.append((reading_order, index, text))
-        lines.sort(key=lambda item: (item[0] is None, item[0] if item[0] is not None else 0, item[1]))
-        return "\n".join(text for _, _, text in lines)
+        ordered_regions = self._ordered_regions()
+        lines: list[tuple[int, Optional[int], int, str]] = []
+        for region_index, region in enumerate(ordered_regions):
+            for line_index, line in enumerate(region.iterfind(".//TextLine")):
+                text = self.get_text(line).strip()
+                if not text:
+                    continue
+                if min_confidence is not None:
+                    confidence = self.get_text_confidence(line)
+                    if confidence is not None and confidence < min_confidence:
+                        continue
+                reading_order = self._parse_reading_order(line)
+                lines.append((region_index, reading_order, line_index, text))
+        lines.sort(key=lambda item: (item[0], item[1] is None, item[1] if item[1] is not None else 0, item[2]))
+        return "\n".join(text for _, _, _, text in lines)
+
+    def _ordered_regions(self) -> list[ET.Element]:
+        """Return every text region, ordered by its page-level reading order.
+
+        Regions that carry no reading order keep their document order and are
+        placed after the ordered ones.
+
+        Returns:
+            list[ET.Element]: The regions to read lines from.
+        """
+        regions: list[tuple[Optional[int], int, ET.Element]] = []
+        for index, region in enumerate(self.iterfind(".//TextRegion")):
+            regions.append((self._parse_reading_order(region), index, region))
+        regions.sort(key=lambda item: (item[0] is None, item[0] if item[0] is not None else 0, item[1]))
+        return [region for _, _, region in regions]
 
     def _parse_reading_order(self, element: ET.Element) -> Optional[int]:
         """Parse the reading order index from an element's ``custom`` attribute.
+
+        The index is only meaningful among siblings that share the same parent,
+        so it must never be compared across regions.
 
         Args:
             element (ET.Element): The element to parse.

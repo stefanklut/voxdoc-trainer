@@ -13,21 +13,60 @@ model:
   use_qlora: false
   lora_r: 16
   lora_alpha: 32
+  # lora_target_modules defaults to every projection a Qwen3.5 block owns;
+  # only override it when you know the model's module names.
 data:
   train_path: data/train_sft
   eval_path: null
   max_length: null
   image_root: null   # corpus root for --image-mode reference datasets
+  max_pixels: 1003520  # ceiling on pixels per page image (~1280x784); null = uncapped
 training:
   output_dir: outputs/sft_run
   per_device_train_batch_size: 2
   num_train_epochs: 3
-  learning_rate: 1e-4
+  learning_rate: 1.0e-4
   report_to: [tensorboard]
   dry_run: false
   assistant_only_loss: false
   precompute_ref_log_probs: false
 ```
+
+Two config gotchas worth knowing:
+
+- **Write scientific notation with a decimal point.** YAML 1.1 reads `1e-4` as a
+  *string*, not a number, so write `1.0e-4`. A numeric field given a value that
+  cannot be read as a number is rejected at load time with
+  `Config 'training.learning_rate' must be a float, got 'fast'` rather than
+  failing inside the optimizer.
+- **Unknown keys are reported, not swallowed.** A typo'd key (`tarining:` instead
+  of `training:`, or `leanring_rate`) logs
+  `Ignoring unknown key '...' in config section '...'` so a silently ignored
+  setting is visible in the run log.
+
+### LoRA target modules
+
+`model.lora_target_modules` defaults to the full set of projections a Qwen3.5
+block contains — the gated-delta-net linear attention (`in_proj_qkv`,
+`in_proj_z`, `in_proj_a`, `in_proj_b`, `out_proj`), the sparse full attention
+(`q_proj`, `k_proj`, `v_proj`, `o_proj`), the MLP (`gate_proj`, `up_proj`,
+`down_proj`), and the vision tower (`qkv`, `proj`, `linear_fc1`, `linear_fc2`).
+
+The default matters: the `q/k/v/o_proj` list copied from text-only LLM recipes
+reaches only ~10% of a hybrid model's linear layers, because Qwen3.5 puts three
+of every four layers behind gated delta nets with no `*_proj` attention at all.
+On `Qwen/Qwen3.5-27B` the attention-only list adapts 64 of 607 linear modules
+(10.5%) while the default adapts 606 (99.8%).
+
+Every trainer logs the coverage before it starts:
+
+```
+LoRA targets cover 606/607 linear modules (99.8%)
+```
+
+If you override the list and it matches nothing, the run warns
+`No linear module matched lora_target_modules=[...]; the adapter trains nothing.`
+and names the first few linear modules so you can correct the patterns.
 
 ## Message history
 
@@ -52,17 +91,21 @@ pretrain config (`grpo_pretrain.yaml`) that optimizes CER directly (see
 [Pretraining (Old Dutch) with GRPO + CER](#pretraining-old-dutch-with-grpo--cer)).
 
 ```bash
-python src/train_sft.py --config configs/sft.yaml
-python src/train_dpo.py --config configs/dpo.yaml
-python src/train_kto.py --config configs/kto.yaml
-python src/train_grpo.py --config configs/grpo.yaml
-python src/train_grpo.py --config configs/grpo_pretrain.yaml
+python -m src.train_sft --config configs/sft.yaml
+python -m src.train_dpo --config configs/dpo.yaml
+python -m src.train_kto --config configs/kto.yaml
+python -m src.train_grpo --config configs/grpo.yaml
+python -m src.train_grpo --config configs/grpo_pretrain.yaml
 ```
+
+Run them as modules (`python -m src.train_sft`), not as scripts
+(`python src/train_sft.py`): the trainers import each other through the `src`
+package, and the script form fails with `No module named 'src'`.
 
 A dry-run config validates the pipeline before committing GPU time:
 
 ```bash
-python src/train_sft.py --config configs/sft_dry_run.yaml
+python -m src.train_sft --config configs/sft_dry_run.yaml
 ```
 
 ## Training pipeline (recommended order)
@@ -126,7 +169,7 @@ for teaching the model to transcribe historical documents.
   function (pretrain: `[1.0]`).
 
 ```bash
-python src/train_grpo.py --config configs/grpo_pretrain.yaml
+python -m src.train_grpo --config configs/grpo_pretrain.yaml
 ```
 
 **Recommended recipe:** a short **SFT warm-start** (so the model can already emit
@@ -153,6 +196,36 @@ Reasoning-model considerations:
 - Use `loss_type: dapo` (the default) to avoid length bias / reward hacking.
 - Watch the `reward/truncated` metric to size `max_completion_length`.
 - Keep `beta` low (0.0) and `temperature` ~1.0 for exploration.
+
+### GRPO batch sizing
+
+TRL requires the generation batch to hold whole groups of completions for the
+same prompt, so `per_device_train_batch_size × gradient_accumulation_steps ×
+number_of_processes` must be divisible by `grpo.num_generations`. With the
+default `num_generations: 8`, a batch size of 2 needs
+`gradient_accumulation_steps: 4` (2 × 4 = 8); the shipped configs do this. The
+trainer checks it before loading the model and says what to set:
+
+```
+per_device_train_batch_size (2) * gradient_accumulation_steps (1) = 2 is not
+divisible by num_generations (8). Set gradient_accumulation_steps to a multiple of 4.
+```
+
+Because the generation batch counts *unique prompts* per optimizer step, a
+1366-prompt dataset is ~1366 steps at `num_train_epochs: 1`, not 1366/8.
+
+GRPO rows also need a `ground_truth` column — the answer the reward functions
+score completions against. The trainer checks the dataset's columns against the
+selected rewards' parameters before loading the model, so a wrong column name
+fails in seconds instead of after a full checkpoint load and a batch of
+rollouts:
+
+```
+The GRPO dataset at data/grpo has columns ['images', 'prompt', 'solution'] but
+cer_reward() needs ['ground_truth']. GRPO rows need a 'ground_truth' column
+holding the answer the rewards score the completion against
+(see docs/data_formats.md).
+```
 
 ## Build DocLang training data
 
@@ -183,6 +256,13 @@ matching image are skipped:
 python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --output data/unicode_transcription
 python tools/data_creators/build_transcription_data.py --input path/to/corpus/ --images path/to/images/ --output data/unicode_transcription
 ```
+
+Recognisers report a confidence per line; on handwritten corpora a large minority
+of lines are ones the recogniser was unsure about, and those make poor training
+targets. `--min-conf 0.8` drops them (lines with no recorded confidence are
+kept). Regions are ordered by their page-level reading order and lines by theirs
+*within* their region, so paragraphs are never interleaved. See
+[PAGE XML transcription](data_formats.md#page-xml-plain-unicode-transcription).
 
 ## Build bbox grounding training data
 
@@ -280,6 +360,36 @@ location; otherwise the roots recorded in the manifest are used. See
 [Storing images: embedded vs. referenced](data_formats.md#storing-images-embedded-vs-referenced)
 for the size/portability trade-off and how resolution works.
 
+## Train and eval splits
+
+Every creator takes more than one `--input` root, so a corpus that keeps its
+pages in per-document folders needs no split flag: point the training build at
+the training folders and a second build at the held-out ones. For an NL-HaNA
+corpus whose pages live in folders `1`, `2`, `3` and `10` (the last being the
+official test set):
+
+```bash
+python tools/data_creators/build_transcription_data.py \
+  --input corpus/1 corpus/2 corpus/3 --output data/transcription_train --image-mode reference
+
+python tools/data_creators/build_transcription_data.py \
+  --input corpus/10 --output data/transcription_eval --image-mode reference
+```
+
+and then:
+
+```yaml
+data:
+  train_path: data/transcription_train
+  eval_path: data/transcription_eval
+  eval_strategy: steps   # and set training.eval_steps
+```
+
+Keep the two builds consistent: pass the same `--min-conf`, `--seed` and
+`--image-mode` to both, and give both the same `--images` roots if you pass any.
+`eval_path` is used by SFT, DPO and KTO; GRPO generates its own rollouts and
+ignores it.
+
 ## Dry-run / smoke mode
 
 Set `dry_run: true` in the config (or `max_steps` to a tiny value) to
@@ -294,7 +404,7 @@ TRL/transformers native resume is supported via `trainer.train(resume_from_check
 Use accelerate:
 
 ```bash
-accelerate launch --num_processes 2 src/train_sft.py --config configs/sft.yaml
+accelerate launch --num_processes 2 -m src.train_sft --config configs/sft.yaml
 ```
 
 For DeepSpeed ZeRO-3, provide an accelerate config file.

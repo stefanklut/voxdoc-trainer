@@ -497,3 +497,144 @@ class TestAddImageModeArgument:
     def test_custom_default(self) -> None:
         """A caller can advertise a different default."""
         assert self._parser("reference").parse_args([]).image_mode == "reference"
+
+
+class TestPixelCap:
+    """Tests for the ceiling on how many pixels reach the vision encoder."""
+
+    def test_draft_size_scales_to_the_ceiling(self) -> None:
+        """A 20 megapixel scan is scaled to the ceiling, aspect ratio preserved."""
+        from utils.image_loading import _draft_size
+
+        width, height = _draft_size((5000, 4000), 1_000_000)
+        assert width * height <= 1_000_000
+        assert abs((width / height) - (5000 / 4000)) < 0.01
+
+    def test_draft_size_leaves_small_images_alone(self) -> None:
+        """An image already below the ceiling is returned unchanged."""
+        from utils.image_loading import _draft_size
+
+        assert _draft_size((100, 80), 1_000_000) == (100, 80)
+
+    def test_resize_enforces_the_ceiling_pil_draft_cannot(self) -> None:
+        """JPEG draft mode only snaps to power-of-two reductions, so the resize is what guarantees the cap."""
+        from PIL import Image
+
+        from utils.image_loading import _resize_to_max_pixels
+
+        image = Image.new("RGB", (5000, 3983))
+        capped = _resize_to_max_pixels(image, 1_003_520)
+        assert capped.width * capped.height <= 1_003_520
+
+    def test_resize_keeps_small_images_untouched(self) -> None:
+        """An image below the ceiling is passed through by identity, not resampled."""
+        from PIL import Image
+
+        from utils.image_loading import _resize_to_max_pixels
+
+        image = Image.new("RGB", (64, 64))
+        assert _resize_to_max_pixels(image, 1_003_520) is image
+
+    def test_cap_processor_pixels_rewrites_longest_edge(self) -> None:
+        """The ceiling lands in the ``size`` mapping, which is what the processor's resize reads.
+
+        transformers' ``SizeDict`` is a dataclass that only *behaves* like a
+        mapping, so an ``isinstance(size, dict)`` guard silently skips the cap and
+        a 20 megapixel scan still becomes a 65000 patch prompt.
+        """
+        from transformers.image_utils import SizeDict
+
+        class FakeProcessor:
+            def __init__(self) -> None:
+                self.image_processor = type(
+                    "IP", (), {"size": SizeDict(height=None, width=None, longest_edge=16_777_216, shortest_edge=65_536)}
+                )()
+
+        from utils.image_loading import cap_processor_pixels
+
+        processor = FakeProcessor()
+        assert cap_processor_pixels(processor, 1_003_520) is True
+        assert processor.image_processor.size["longest_edge"] == 1_003_520
+        assert processor.image_processor.size["shortest_edge"] == 65_536
+        assert type(processor.image_processor.size).__name__ == "SizeDict"
+
+    def test_cap_processor_pixels_reaches_a_real_processor(self) -> None:
+        """Capping a shipped Qwen processor actually shrinks what its image encoder emits."""
+        import pytest
+        from PIL import Image
+        from transformers import AutoProcessor
+
+        from utils.image_loading import cap_processor_pixels
+
+        try:
+            processor = AutoProcessor.from_pretrained("Qwen/Qwen3.5-0.8B")
+        except Exception as exc:  # pragma: no cover - offline CI
+            pytest.skip(f"processor unavailable: {exc}")
+        image = Image.new("RGB", (5000, 3983))
+        uncapped = processor(images=[image], return_tensors="pt")["pixel_values"].shape[0]
+        assert cap_processor_pixels(processor, 1_003_520) is True
+        capped = processor(images=[image], return_tensors="pt")["pixel_values"].shape[0]
+        assert capped < uncapped
+        assert capped <= 1_003_520  # one patch row per merged patch, never more pixels than the ceiling
+
+    def test_cap_processor_pixels_does_not_leak_to_other_processors(self) -> None:
+        """Mutating one processor's size must not cap every processor built afterwards."""
+        from transformers.image_utils import SizeDict
+
+        from utils.image_loading import cap_processor_pixels
+
+        defaults = SizeDict(longest_edge=16_777_216, shortest_edge=65_536)
+
+        class FakeProcessor:
+            def __init__(self) -> None:
+                self.image_processor = type("IP", (), {"size": defaults})()
+
+        cap_processor_pixels(FakeProcessor(), 1_003_520)
+        assert defaults["longest_edge"] == 16_777_216
+        assert FakeProcessor().image_processor.size["longest_edge"] == 16_777_216
+
+    def test_cap_processor_pixels_is_idempotent_and_safe_without_an_encoder(self) -> None:
+        """Re-capping does nothing, and a text-only processor is reported as uncappable."""
+        from transformers.image_utils import SizeDict
+
+        from utils.image_loading import cap_processor_pixels
+
+        class FakeProcessor:
+            def __init__(self) -> None:
+                self.image_processor = type("IP", (), {"size": SizeDict(longest_edge=500, shortest_edge=4)})()
+
+        processor = FakeProcessor()
+        assert cap_processor_pixels(processor, 1_003_520) is True
+        assert processor.image_processor.size["longest_edge"] == 500
+        assert cap_processor_pixels(object(), 1_003_520) is False
+
+    def test_collator_downsamples_on_open(self, tmp_path: Path) -> None:
+        """A reference-mode page is decoded at, or below, the collator's ceiling."""
+        image = _make_image(tmp_path / "corpus" / "page.jpg", size=(3000, 2400))
+        wrapper = LazyImageCollator(lambda examples: examples, [tmp_path / "corpus"], max_pixels=1_003_520)
+        opened = wrapper([{"images": ["page.jpg"]}])[0]["images"][0]
+        assert opened.width * opened.height <= 1_003_520
+        assert image.exists()
+
+    def test_collator_ceiling_can_be_disabled(self, tmp_path: Path) -> None:
+        """``max_pixels=None`` hands the collator the scan at full resolution."""
+        _make_image(tmp_path / "corpus" / "page.jpg", size=(1200, 900))
+        wrapper = LazyImageCollator(lambda examples: examples, [tmp_path / "corpus"], max_pixels=None)
+        opened = wrapper([{"images": ["page.jpg"]}])[0]["images"][0]
+        assert opened.size == (1200, 900)
+
+    def test_wrap_trainer_collator_forwards_the_ceiling(self, tmp_path: Path) -> None:
+        """The ceiling configured for the run reaches the collator that decodes the rows."""
+
+        class Trainer:
+            def __init__(self) -> None:
+                self.data_collator = lambda examples: examples
+
+        _make_image(tmp_path / "corpus" / "page.jpg", size=(3000, 2400))
+        dataset = save_image_dataset(
+            [{"images": ["page.jpg"], "prompt": "x"}], tmp_path / "ds", "reference", [tmp_path / "corpus"]
+        )
+        trainer = Trainer()
+        assert wrap_trainer_collator(trainer, dataset, None, tmp_path / "ds", max_pixels=400_000) is True
+        opened = trainer.data_collator([{"images": ["page.jpg"]}])[0]["images"][0]
+        assert opened.width * opened.height <= 400_000
