@@ -577,6 +577,13 @@ Merge a LoRA adapter:
 python tools/merge_adapter.py --base_model Qwen/Qwen3.5-9B --adapter_path outputs/sft_run --output_dir outputs/merged
 ```
 
+The base model is loaded as `AutoModelForImageTextToText` when its config declares a
+vision tower and as `AutoModelForCausalLM` otherwise, matching how the trainers load
+it. Passing the text-only id of a vision-language model fails with
+`RuntimeError: Adapter '...' did not apply to ...: N of its tensors had no matching
+module` instead of quietly merging a fraction of the adapter — PEFT only warns about
+this, and a silently partial merge still saves and still reports success.
+
 Run inference:
 
 ```bash
